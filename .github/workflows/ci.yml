@@ -58,6 +58,30 @@ jobs:
       - name: Линтер
         run: golangci-lint run ./...
 
+  ui:
+    name: Интерфейс
+    runs-on: [self-hosted, hysteria-ward-ci]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Сборка интерфейса — одна команда, и её результат уезжает в бинарь.
+      - name: Собрать интерфейс
+        run: make ui
+
+      # Собранный интерфейс лежит в репозитории, поэтому он может отстать от
+      # исходников. Здесь видно, что сборка из текущих исходников даёт ровно то,
+      # что закоммичено.
+      - name: Проверить, что собранное не отстало от исходников
+        run: |
+          if ! git diff --exit-code --stat -- internal/ui/dist; then
+            echo "internal/ui/dist отстал от web/: выполните make ui и закоммитьте результат"
+            exit 1
+          fi
+
   build:
     name: Сборка linux/${{ matrix.goarch }}
     runs-on: [self-hosted, hysteria-ward-ci]

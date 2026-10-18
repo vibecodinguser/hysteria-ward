@@ -1,0 +1,15 @@
+{
+  "$schema": "https://inlang.com/schema/inlang-message-format",
+  "app_title": "Hysteria Ward",
+  "nav_overview": "Обзор",
+  "nav_users": "Пользователи",
+  "nav_settings": "Настройки",
+  "nav_logs": "Журнал",
+  "overview_hint": "Здесь появятся состояние сервера и графики трафика.",
+  "users_hint": "Здесь появятся пользователи и выпуск ключей.",
+  "settings_hint": "Здесь появятся настройки сервера и кнопка «Применить».",
+  "logs_hint": "Здесь появятся последние строки журнала.",
+  "not_found_title": "Страница не найдена",
+  "not_found_hint": "Такого адреса в панели нет.",
+  "to_overview": "На главную"
+}

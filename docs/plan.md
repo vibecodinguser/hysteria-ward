@@ -59,8 +59,8 @@ internal/daemon/         жизненный цикл: база, журнал, я
 internal/authn/          Argon2id, сессии, CSRF, задержка при переборе
 internal/certs/          ACME, self-signed, pinSHA256
 internal/metrics/        агрегация и история (1ч/5с, 3ч/15с, 24ч/1м, 7д/5м)
-internal/api/            REST + SSE
-internal/ui/             встроенная SPA (go:embed)
+internal/api/            HTTPS-сервер панели: REST + SSE, отдаёт встроенную SPA
+internal/ui/             встроенная SPA (go:embed), собранная из web/
 web/                     исходники Svelte + Vite + Tailwind + Paraglide
 packaging/               install.sh, update.sh, systemd-юнит
 ```
@@ -69,6 +69,11 @@ packaging/               install.sh, update.sh, systemd-юнит
 единственное место, знающее про агрегацию; `store` — единственное место, знающее про bbolt; `config` —
 единственное место, знающее, из чего состоит конфигурация сервера; `daemon` — единственное место, знающее
 жизненный цикл ядра и порядок его перезапуска.
+
+Сборка интерфейса — `make ui`: она кладёт результат в `internal/ui/dist`, а оттуда его забирает `go:embed`.
+Собранный интерфейс **лежит в репозитории**, поэтому `go build` и `go test` работают в любом клоне без Node.js,
+а на сервере не появляется ни интерпретаторов, ни файлов рядом с бинарём. Плата за это — собранное может
+отстать от `web/`; в CI это ловится отдельной задачей.
 
 Важно: `core/v2` принимает готовые `net.PacketConn` и `Authenticator`. Обвязка, которая в оригинале живёт в слое
 `app/`, вынесена в отдельный **импортируемый** модуль `github.com/apernet/hysteria/extras/v2`: обфускация
