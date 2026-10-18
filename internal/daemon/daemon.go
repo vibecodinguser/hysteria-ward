@@ -154,28 +154,44 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	_ = d.Apply()
 
+	panelErr := d.waitForStop(ctx, panelDone)
+
+	// Остановка идёт в обратном порядке: сначала ядро, потом интерфейс — он
+	// рассказывает о том, что происходило с ядром, и должен пережить его.
+	stopPanel()
+
+	coreErr := d.stopCore()
+
+	// Интерфейс дожидается обязательно: журнал и база закрываются вызывающим, и
+	// интерфейс не должен писать в уже закрытый журнал.
+	if err := errors.Join(panelErr, coreErr, waitForPanel(panelDone)); err != nil {
+		return err
+	}
+
+	d.logger.Info("панель остановлена")
+
+	return nil
+}
+
+// waitForStop ждёт повода остановиться: отмены контекста или отказа интерфейса.
+//
+// Падение ядра поводом не считается: панель работает и без ядра, чтобы
+// администратор мог починить конфигурацию. Возвращается ошибка интерфейса, если
+// остановиться пришлось из-за неё; nil означает, что панель просто попросили
+// закрыться.
+func (d *Daemon) waitForStop(ctx context.Context, panelDone <-chan error) error {
 	for {
 		select {
 		case <-ctx.Done():
-			d.mu.Lock()
-			err := d.stopLocked()
-			d.mu.Unlock()
-			if err != nil {
-				return err
-			}
-
-			// Интерфейс закрывается последним: он рассказывает о том, что
-			// происходило с ядром.
-			stopPanel()
-
-			if err := <-panelDone; err != nil {
-				return fmt.Errorf("интерфейс остановлен: %w", err)
-			}
-
-			d.logger.Info("панель остановлена")
 			return nil
 
 		case err := <-panelDone:
+			// Отмена контекста закрывает и интерфейс, поэтому в этой ветке ошибки
+			// может не быть — тогда это та же штатная остановка.
+			if err == nil {
+				return nil
+			}
+
 			return fmt.Errorf("интерфейс остановлен: %w", err)
 
 		case f := <-d.failures:
@@ -188,6 +204,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.mu.Unlock()
 		}
 	}
+}
+
+// stopCore останавливает ядро, если оно поднято.
+func (d *Daemon) stopCore() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.stopLocked()
 }
 
 // openPanel поднимает HTTPS-сервер интерфейса и возвращает канал с кодом его
@@ -207,9 +231,24 @@ func (d *Daemon) openPanel(ctx context.Context) (<-chan error, error) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- panel.Run(ctx) }()
+	go func() {
+		done <- panel.Run(ctx)
+		close(done)
+	}()
 
 	return done, nil
+}
+
+// waitForPanel дожидается закрытия интерфейса. Канал закрывает горутина
+// интерфейса, поэтому повторное чтение не ждёт: значение могло быть разобрано
+// раньше.
+func waitForPanel(panelDone <-chan error) error {
+	err := <-panelDone
+	if err != nil {
+		return fmt.Errorf("интерфейс остановлен: %w", err)
+	}
+
+	return nil
 }
 
 // Apply перечитывает конфигурацию из базы и перезапускает ядро. Активные

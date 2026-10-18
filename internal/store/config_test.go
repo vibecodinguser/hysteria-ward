@@ -35,6 +35,7 @@ func TestSaveAndReadConfig(t *testing.T) {
 
 	want := config.Config{
 		Listen: ":8443",
+		Panel:  config.Panel{Listen: "127.0.0.1:9443"},
 		TLS: config.TLS{
 			Cert: "/etc/hysteria-ward/certs/panel.crt",
 			Key:  "/etc/hysteria-ward/certs/panel.key",
@@ -68,5 +69,42 @@ func TestSaveAndReadConfig(t *testing.T) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Config() = %+v, ожидалось %+v", got, want)
+	}
+}
+
+// TestConfigFillsMissingFields — конфигурация без новых полей (так выглядит база,
+// записанная прежней версией панели) дополняется значениями по умолчанию.
+//
+// Это не украшение: пустой адрес панели — не «слушать петлю», а «слушать все
+// интерфейсы». Оставить его как есть значило бы выставить панель наружу против
+// воли администратора.
+func TestConfigFillsMissingFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hysteria-ward.db")
+
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	defer s.Close()
+
+	old := config.Config{
+		Listen:     ":8443",
+		TLS:        config.TLS{Cert: "/etc/cert.pem", Key: "/etc/key.pem"},
+		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
+	}
+	if err := s.SaveConfig(old); err != nil {
+		t.Fatalf("SaveConfig() = %v", err)
+	}
+
+	got, err := s.Config()
+	if err != nil {
+		t.Fatalf("Config() = %v", err)
+	}
+
+	if got.Panel.Listen != config.Default().Panel.Listen {
+		t.Errorf("Panel.Listen = %q, ожидался адрес по умолчанию %q", got.Panel.Listen, config.Default().Panel.Listen)
+	}
+	if got.Listen != old.Listen {
+		t.Errorf("Listen = %q, ожидался %q: заполнение умолчаний не должно затирать заданное", got.Listen, old.Listen)
 	}
 }

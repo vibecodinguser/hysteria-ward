@@ -140,9 +140,12 @@ func startPanel(cfg config.Config, logger *slog.Logger, debug bool) (daemon.Pane
 // panelHosts — имена, которые должен покрывать отладочный сертификат: панель
 // открывают по тому адресу, который она слушает.
 func panelHosts(listen string) []string {
+	// Разбор может не сработать, а в адресе вроде «:8443» имени хоста нет вовсе.
+	// Тогда остаётся имя по умолчанию: отладочный сертификат нужен ровно для того,
+	// чтобы открыть панель с той же машины.
 	host, _, err := net.SplitHostPort(listen)
-	if err != nil {
-		host = ""
+	if err != nil || host == "" {
+		return []string{"localhost"}
 	}
 
 	return []string{"localhost", host}

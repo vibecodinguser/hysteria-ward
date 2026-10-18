@@ -59,7 +59,7 @@ internal/daemon/         жизненный цикл: база, журнал, я
 internal/authn/          Argon2id, сессии, CSRF, задержка при переборе
 internal/certs/          ACME, self-signed, pinSHA256
 internal/metrics/        агрегация и история (1ч/5с, 3ч/15с, 24ч/1м, 7д/5м)
-internal/api/            HTTPS-сервер панели: REST + SSE, отдаёт встроенную SPA
+internal/api/            HTTPS-сервер панели: REST + SSE (интерфейс отдаётся обработчиком из ui)
 internal/ui/             встроенная SPA (go:embed), собранная из web/
 web/                     исходники Svelte + Vite + Tailwind + Paraglide
 packaging/               install.sh, update.sh, systemd-юнит
@@ -74,6 +74,9 @@ packaging/               install.sh, update.sh, systemd-юнит
 Собранный интерфейс **лежит в репозитории**, поэтому `go build` и `go test` работают в любом клоне без Node.js,
 а на сервере не появляется ни интерпретаторов, ни файлов рядом с бинарём. Плата за это — собранное может
 отстать от `web/`; в CI это ловится отдельной задачей.
+
+Из сети сборке нужен только `npm ci`: плагины i18n подключаются из `node_modules`, а не с чужого CDN, поэтому их
+целостность проверяет npm.
 
 Важно: `core/v2` принимает готовые `net.PacketConn` и `Authenticator`. Обвязка, которая в оригинале живёт в слое
 `app/`, вынесена в отдельный **импортируемый** модуль `github.com/apernet/hysteria/extras/v2`: обфускация

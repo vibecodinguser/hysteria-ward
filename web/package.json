@@ -10,6 +10,8 @@
   },
   "devDependencies": {
     "@inlang/paraglide-js": "^2.29.0",
+    "@inlang/plugin-m-function-matcher": "^2.3.0",
+    "@inlang/plugin-message-format": "^4.5.0",
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
     "@tailwindcss/vite": "^4.3.3",
     "svelte": "^5.57.2",

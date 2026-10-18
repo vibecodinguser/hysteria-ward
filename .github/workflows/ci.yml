@@ -73,12 +73,13 @@ jobs:
         run: make ui
 
       # Собранный интерфейс лежит в репозитории, поэтому он может отстать от
-      # исходников. Здесь видно, что сборка из текущих исходников даёт ровно то,
-      # что закоммичено.
+      # исходников. git status, а не git diff: так видно и удалённые, и новые файлы
+      # сборки, а не только правки в известных.
       - name: Проверить, что собранное не отстало от исходников
         run: |
-          if ! git diff --exit-code --stat -- internal/ui/dist; then
+          if [ -n "$(git status --porcelain -- internal/ui/dist)" ]; then
             echo "internal/ui/dist отстал от web/: выполните make ui и закоммитьте результат"
+            git status --short -- internal/ui/dist
             exit 1
           fi
 

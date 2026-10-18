@@ -12,7 +12,7 @@ export function currentPath() {
 }
 
 /** Перейти по адресу, не перезагружая страницу. */
-export function navigate(to) {
+function navigate(to) {
 	if (to === path) {
 		return
 	}

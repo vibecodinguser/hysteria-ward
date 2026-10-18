@@ -270,8 +270,6 @@ func newPanel(t *testing.T, cfg config.Config) *panel {
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	t.Cleanup(p.cancel)
 
-	p.done = make(chan error, 1)
-
 	return p
 }
 
@@ -447,6 +445,12 @@ func TestPanelDeathStopsRun(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "интерфейс остановлен") {
 		t.Errorf("Run() = %v, ожидалась причина об интерфейсе", err)
+	}
+
+	// Ядро поднималось, поэтому его нужно было остановить: панель не оставляет
+	// за собой работающий сервер.
+	if !p.core.lastCore().isStopped() {
+		t.Error("ядро не остановлено после отказа интерфейса")
 	}
 }
 

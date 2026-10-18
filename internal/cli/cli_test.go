@@ -121,11 +121,11 @@ func TestRunServeServesInterface(t *testing.T) {
 	})
 
 	panel := serve(t, "--db", dbPath, "--log", logPath)
-	waitForLog(t, logPath, "интерфейс открыт")
 
 	// Клиент доверяет ровно тому сертификату, который лежит в настройках: так
 	// проверяется, что панель отдаёт именно его, а не что-нибудь своё.
 	client := trusting(t, certPath)
+	waitForInterface(t, client, panelAddr)
 
 	status, header, body := get(t, client, "https://"+panelAddr+"/")
 	if status != http.StatusOK {
@@ -198,17 +198,18 @@ func TestRunServeDebugWithoutCertificate(t *testing.T) {
 	})
 
 	panel := serve(t, "--db", dbPath, "--log", logPath, "--debug")
-	waitForLog(t, logPath, "интерфейс открыт")
-
-	if log := readLog(t, logPath); !strings.Contains(log, "самоподписанный") {
-		t.Errorf("в журнале нет предупреждения о самоподписанном сертификате: %q", log)
-	}
 
 	// Сертификат самоподписанный, поэтому доверять ему нечем: проверяем сам факт
 	// работы интерфейса.
 	client := &http.Client{
 		Timeout:   5 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+
+	waitForInterface(t, client, panelAddr)
+
+	if log := readLog(t, logPath); !strings.Contains(log, "самоподписанный") {
+		t.Errorf("в журнале нет предупреждения о самоподписанном сертификате: %q", log)
 	}
 
 	status, _, body := get(t, client, "https://"+panelAddr+"/")
@@ -363,6 +364,31 @@ func waitForLog(t *testing.T, path, want string) {
 	}
 
 	t.Fatalf("в журнале так и не появилось %q", want)
+}
+
+// waitForInterface ждёт, пока интерфейс начнёт отвечать.
+//
+// Ждём ответа, а не записи в журнале: панель в тесте должна быть готова к
+// запросам, а не «судя по журналу, готова», и формулировки другого пакета тесту
+// знать не обязательно.
+func waitForInterface(t *testing.T, client *http.Client, addr string) {
+	t.Helper()
+
+	var lastErr error
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get("https://" + addr + "/")
+		if err == nil {
+			resp.Body.Close()
+			return
+		}
+
+		lastErr = err
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("интерфейс так и не начал отвечать: %v", lastErr)
 }
 
 // writeCertificate готовит самоподписанный сертификат для запуска панели в тесте.

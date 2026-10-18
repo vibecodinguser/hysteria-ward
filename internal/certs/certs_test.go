@@ -2,6 +2,7 @@ package certs_test
 
 import (
 	"net"
+	"slices"
 	"testing"
 	"time"
 
@@ -25,13 +26,17 @@ func TestSelfSignedCoversHosts(t *testing.T) {
 	addresses := certificate.Leaf.IPAddresses
 
 	for _, host := range []string{"localhost", "panel.example.com"} {
-		if !contains(names, host) {
+		if !slices.Contains(names, host) {
 			t.Errorf("в DNSNames нет %q: %v", host, names)
 		}
 	}
 
-	if !containsIP(addresses, "127.0.0.1") {
+	if !slices.ContainsFunc(addresses, func(ip net.IP) bool { return ip.String() == "127.0.0.1" }) {
 		t.Errorf("в IPAddresses нет 127.0.0.1: %v", addresses)
+	}
+
+	if slices.Contains(names, "") {
+		t.Errorf("в DNSNames попало пустое имя: %v", names)
 	}
 
 	if certificate.Leaf.IsCA {
@@ -81,24 +86,4 @@ func TestSelfSignedWithoutHosts(t *testing.T) {
 	if certificate.Leaf.Subject.CommonName == "" {
 		t.Error("у сертификата нет общего имени")
 	}
-}
-
-func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-
-	return false
-}
-
-func containsIP(values []net.IP, want string) bool {
-	for _, value := range values {
-		if value.String() == want {
-			return true
-		}
-	}
-
-	return false
 }

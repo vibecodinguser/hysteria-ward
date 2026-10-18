@@ -26,6 +26,9 @@ func configBucket(tx *bolt.Tx) (*bolt.Bucket, error) {
 
 // Config возвращает конфигурацию сервера. Пока её не сохраняли, это значения по
 // умолчанию: новая панель не должна требовать настройки, чтобы просто открыться.
+//
+// Недостающие поля дополняются значениями по умолчанию: базу могла записать
+// прежняя панель, которой этих полей ещё не было.
 func (s *Store) Config() (config.Config, error) {
 	var cfg config.Config
 
@@ -44,6 +47,8 @@ func (s *Store) Config() (config.Config, error) {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			return fmt.Errorf("разбор конфигурации: %w", err)
 		}
+
+		cfg = cfg.FillDefaults()
 
 		return nil
 	})
