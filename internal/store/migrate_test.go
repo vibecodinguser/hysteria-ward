@@ -1,7 +1,6 @@
 package store
 
 import (
-	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,8 +20,7 @@ func TestMigrationAppliesStepsAndBacksUp(t *testing.T) {
 	restore := migrations
 	migrations = []func(tx *bolt.Tx) error{
 		func(tx *bolt.Tx) error {
-			_, err := tx.CreateBucketIfNotExists(bucketEvents)
-			return err
+			return tx.Bucket(bucketConfig).Put([]byte("migrated"), []byte("yes"))
 		},
 	}
 	oldVersion := schemaVersion
@@ -50,9 +48,41 @@ func TestMigrationAppliesStepsAndBacksUp(t *testing.T) {
 		t.Errorf("копия базы перед миграцией не создана: %v", err)
 	}
 
+	// Копия снята до миграции: в ней старая версия схемы и те же данные.
+	backup, err := bolt.Open(path+".backup-v1", 0o600, &bolt.Options{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("копия не открылась: %v", err)
+	}
+	defer backup.Close()
+
+	err = backup.View(func(tx *bolt.Tx) error {
+		backupVersion, err := readSchemaVersion(tx)
+		if err != nil {
+			return err
+		}
+		if backupVersion != 1 {
+			t.Errorf("в копии версия схемы %d, ожидалась 1", backupVersion)
+		}
+
+		if got := string(tx.Bucket(bucketUsers).Get([]byte("alice"))); got != "secret" {
+			t.Errorf("в копии данные пользователя %q, ожидались %q", got, "secret")
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("View() копии = %v", err)
+	}
+
 	err = s.db.View(func(tx *bolt.Tx) error {
-		if tx.Bucket(bucketEvents) == nil {
-			t.Error("миграция не завела бакет events")
+		for _, name := range schemaBuckets {
+			if tx.Bucket(name) == nil {
+				t.Errorf("после миграции нет бакета %q", name)
+			}
+		}
+
+		if got := string(tx.Bucket(bucketConfig).Get([]byte("migrated"))); got != "yes" {
+			t.Errorf("шаг миграции не применился: config.migrated = %q", got)
 		}
 
 		if got := string(tx.Bucket(bucketUsers).Get([]byte("alice"))); got != "secret" {
@@ -95,12 +125,9 @@ func prepareDatabase(t *testing.T, path string, version int) {
 			return err
 		}
 
-		var raw [8]byte
-		binary.BigEndian.PutUint64(raw[:], uint64(version))
-		if err := meta.Put(keySchemaVersion, raw[:]); err != nil {
+		if err := meta.Put(keySchemaVersion, encodeVersion(version)); err != nil {
 			return err
 		}
-
 		users, err := tx.CreateBucketIfNotExists(bucketUsers)
 		if err != nil {
 			return err

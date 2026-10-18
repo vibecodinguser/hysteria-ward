@@ -88,6 +88,26 @@ func TestOpenCreatesAndReopensDatabase(t *testing.T) {
 	}
 }
 
+// TestOpenInitializesEmptyFile — пустой файл на месте базы (его мог создать
+// установщик или оборванная запись) не считается схемой: вместо вечной ошибки
+// база заводится заново.
+func TestOpenInitializesEmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hysteria-ward.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("пустой файл не создался: %v", err)
+	}
+
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("Open() = %v, ожидалась инициализация пустого файла", err)
+	}
+	defer s.Close()
+
+	if _, err := s.SchemaVersion(); err != nil {
+		t.Fatalf("SchemaVersion() = %v", err)
+	}
+}
+
 // TestNoBackupWhenSchemaIsCurrent — если мигрировать нечего, копия не создаётся:
 // иначе каждый запуск панели плодил бы бэкапы на пустом месте.
 func TestNoBackupWhenSchemaIsCurrent(t *testing.T) {
