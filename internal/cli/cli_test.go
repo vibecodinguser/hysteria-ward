@@ -18,6 +18,8 @@ import (
 
 	"github.com/vibecodinguser/hysteria-ward/internal/build"
 	"github.com/vibecodinguser/hysteria-ward/internal/cli"
+	"github.com/vibecodinguser/hysteria-ward/internal/config"
+	"github.com/vibecodinguser/hysteria-ward/internal/store"
 )
 
 // TestRunVersion проверяет, что --version печатает метаданные сборки
@@ -97,27 +99,20 @@ func TestRunWithoutArguments(t *testing.T) {
 	}
 }
 
-// TestRunServeRequiresCertificate — без сертификата ядро не поднимется, поэтому
-// serve обязан сказать об этом сразу, а не падать где-то в недрах.
-func TestRunServeRequiresCertificate(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-
-	code := cli.Run(context.Background(), []string{"serve"}, &stdout, &stderr)
-
-	if code == 0 {
-		t.Error("Run(serve) без сертификата вернул 0, ожидался ненулевой код")
-	}
-	if !strings.Contains(stderr.String(), "сертификат") {
-		t.Errorf("в stderr нет причины: %q", stderr.String())
-	}
-}
-
-// TestRunServeStopsOnContextCancel — полный путь: serve поднимает ядро, отмена
-// контекста (в бою — SIGTERM) завершает панель с кодом 0.
+// TestRunServeStopsOnContextCancel — полный путь: serve поднимает ядро по
+// конфигурации из базы, отмена контекста (в бою — SIGTERM) завершает панель с
+// кодом 0.
 func TestRunServeStopsOnContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	certPath, keyPath := writeCertificate(t, dir)
+	dbPath := filepath.Join(dir, "hysteria-ward.db")
 	logPath := filepath.Join(dir, "panel.log")
+
+	seedConfig(t, dbPath, config.Config{
+		Listen: "127.0.0.1:0",
+		TLS:    config.TLS{Cert: certPath, Key: keyPath},
+		Masq:   config.Masquerade{Mode: config.MasqOff},
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -125,14 +120,7 @@ func TestRunServeStopsOnContextCancel(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- cli.Run(ctx, []string{
-			"serve",
-			"--db", filepath.Join(dir, "hysteria-ward.db"),
-			"--log", logPath,
-			"--listen", "127.0.0.1:0",
-			"--cert", certPath,
-			"--key", keyPath,
-		}, &stdout, &stderr)
+		done <- cli.Run(ctx, []string{"serve", "--db", dbPath, "--log", logPath}, &stdout, &stderr)
 	}()
 
 	waitForLog(t, logPath, "ядро запущено")
@@ -148,6 +136,61 @@ func TestRunServeStopsOnContextCancel(t *testing.T) {
 	}
 
 	waitForLog(t, logPath, "панель остановлена")
+}
+
+// TestRunServeRunsWithoutCore — ядро без сертификата не поднимется, но панель
+// обязана работать: иначе администратор не откроет интерфейс и не починит
+// конфигурацию снаружи.
+func TestRunServeRunsWithoutCore(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "hysteria-ward.db")
+	logPath := filepath.Join(dir, "panel.log")
+
+	seedConfig(t, dbPath, config.Default())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(ctx, []string{"serve", "--db", dbPath, "--log", logPath}, &stdout, &stderr)
+	}()
+
+	waitForLog(t, logPath, "ядро не запустилось")
+
+	select {
+	case code := <-done:
+		t.Fatalf("панель завершилась без ядра, код %d; stderr: %q", code, stderr.String())
+	default:
+	}
+
+	cancel()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("Run(serve) = %d, ожидалось 0; stderr: %q", code, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("панель не завершилась после отмены контекста")
+	}
+}
+
+// seedConfig кладёт конфигурацию в базу до запуска панели — так же, как это
+// сделает установщик на чистом сервере.
+func seedConfig(t *testing.T, dbPath string, cfg config.Config) {
+	t.Helper()
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	defer s.Close()
+
+	if err := s.SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig() = %v", err)
+	}
 }
 
 // waitForLog ждёт, пока в журнале появится подстрока.

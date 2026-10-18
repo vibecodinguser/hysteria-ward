@@ -9,6 +9,7 @@ import (
 	"io"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/build"
+	"github.com/vibecodinguser/hysteria-ward/internal/config"
 	"github.com/vibecodinguser/hysteria-ward/internal/daemon"
 	"github.com/vibecodinguser/hysteria-ward/internal/hycore"
 	"github.com/vibecodinguser/hysteria-ward/internal/logging"
@@ -27,11 +28,11 @@ var usage = fmt.Sprintf(`%[1]s — панель управления серве�
   --help     показать эту справку
 
 Флаги serve:
-  --db      файл базы (по умолчанию /var/lib/hysteria-ward/hysteria-ward.db)
-  --log     файл журнала (по умолчанию /var/log/hysteria-ward/hysteria-ward.log)
-  --listen  адрес и порт ядра (по умолчанию :443)
-  --cert    сертификат TLS
-  --key     ключ TLS
+  --db   файл базы (по умолчанию /var/lib/hysteria-ward/hysteria-ward.db)
+  --log  файл журнала (по умолчанию /var/log/hysteria-ward/hysteria-ward.log)
+
+Сам сервер настраивается в базе: адрес, сертификат, обфускация и masquerade
+хранятся там и меняются из интерфейса панели.
 `, build.Name)
 
 // Run выполняет команду и возвращает код возврата.
@@ -72,43 +73,47 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 
 	dbPath := fs.String("db", "/var/lib/hysteria-ward/hysteria-ward.db", "файл базы")
 	logPath := fs.String("log", "/var/log/hysteria-ward/hysteria-ward.log", "файл журнала")
-	listenAddr := fs.String("listen", ":443", "адрес и порт ядра")
-	certPath := fs.String("cert", "", "сертификат TLS")
-	keyPath := fs.String("key", "", "ключ TLS")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
 
-	if *certPath == "" || *keyPath == "" {
-		fmt.Fprintln(stderr, "сертификат не задан: укажите --cert и --key")
-		return 1
-	}
-
-	certificate, err := tls.LoadX509KeyPair(*certPath, *keyPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "сертификат: %v\n", err)
-		return 1
-	}
-
-	err = daemon.Run(ctx, daemon.Options{
+	panel, err := daemon.New(daemon.Options{
 		DBPath: *dbPath,
 		Log:    logging.Options{Path: *logPath},
-		StartCore: func() (daemon.Core, error) {
-			return hycore.Start(hycore.Config{
-				ListenAddr:    *listenAddr,
-				TLS:           certificate,
-				Authenticator: noUsers{},
-				Traffic:       noTraffic{},
-			})
+		StartCore: func(cfg config.Config) (daemon.Core, error) {
+			return startCore(cfg)
 		},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
+	defer func() { _ = panel.Close() }()
+
+	if err := panel.Run(ctx); err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
 
 	return 0
+}
+
+// startCore собирает ядро Hysteria 2 по конфигурации из базы. Сертификат читается
+// при каждом запуске: «Применить» должно подхватывать и его тоже.
+func startCore(cfg config.Config) (daemon.Core, error) {
+	certificate, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
+	if err != nil {
+		return nil, fmt.Errorf("сертификат: %w", err)
+	}
+
+	return hycore.Start(hycore.Config{
+		ListenAddr:    cfg.Listen,
+		TLS:           certificate,
+		ObfsPassword:  cfg.Obfs.Password,
+		Authenticator: noUsers{},
+		Traffic:       noTraffic{},
+	})
 }
 
 // noUsers отвергает любой ключ: пользователей ещё нет, они появятся вместе с
