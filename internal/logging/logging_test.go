@@ -93,10 +93,22 @@ func TestFileRotates(t *testing.T) {
 	}
 }
 
-// TestOpenRejectsEmptyMemory — нулевая ёмкость памяти делает страницу логов
-// бессмысленной: это ошибка настройки, а не молчаливое «ничего не покажем».
-func TestOpenRejectsEmptyMemory(t *testing.T) {
-	if _, err := logging.Open(logging.Options{Lines: 0}); err == nil {
-		t.Fatal("Open() с нулевой ёмкостью прошёл, ожидалась ошибка")
+// TestOpenRejectsNegativeMemory — отрицательная ёмкость памяти бессмысленна:
+// это ошибка настройки, а не молчаливое «ничего не покажем». Ноль — другое
+// дело, он означает значение по умолчанию.
+func TestOpenRejectsNegativeMemory(t *testing.T) {
+	if _, err := logging.Open(logging.Options{Lines: -1}); err == nil {
+		t.Fatal("Open() с отрицательной ёмкостью прошёл, ожидалась ошибка")
+	}
+
+	log, err := logging.Open(logging.Options{})
+	if err != nil {
+		t.Fatalf("Open() с нулевой ёмкостью = %v, ожидалось значение по умолчанию", err)
+	}
+	defer log.Close()
+
+	log.Logger().Info("строка")
+	if lines := log.Lines(); len(lines) != 1 {
+		t.Errorf("в памяти %d строк, ожидалась одна", len(lines))
 	}
 }

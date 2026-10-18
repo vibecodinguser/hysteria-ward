@@ -14,7 +14,12 @@ import (
 // defaultMaxSize — предел файла журнала, если настройка не задана.
 const defaultMaxSize = 10 << 20
 
-// Options — куда и сколько писать.
+// defaultLines — сколько последних строк держится в памяти, если настройка не
+// задана.
+const defaultLines = 1000
+
+// Options — куда и сколько писать. Нулевой предел и нулевая ёмкость означают
+// значения по умолчанию.
 type Options struct {
 	// Path — файл журнала. Пустой — писать только в память.
 	Path string
@@ -29,20 +34,23 @@ type Options struct {
 // Log — открытый журнал.
 type Log struct {
 	logger *slog.Logger
-	ring   *ring
+	ring   *lineRing
 	file   *rotatingFile
 }
 
 // Open открывает журнал и готовит оба приёмника.
 func Open(opts Options) (*Log, error) {
-	if opts.Lines <= 0 {
-		return nil, fmt.Errorf("журнал: ёмкость памяти %d, нужна положительная", opts.Lines)
+	if opts.Lines < 0 {
+		return nil, fmt.Errorf("журнал: ёмкость памяти %d, не может быть отрицательной", opts.Lines)
+	}
+	if opts.Lines == 0 {
+		opts.Lines = defaultLines
 	}
 	if opts.MaxSize <= 0 {
 		opts.MaxSize = defaultMaxSize
 	}
 
-	memory := newRing(opts.Lines)
+	memory := newLineRing(opts.Lines)
 	writers := []io.Writer{memory}
 
 	var file *rotatingFile
@@ -79,21 +87,21 @@ func (l *Log) Close() error {
 	return l.file.Close()
 }
 
-// ring — кольцевой буфер строк фиксированной ёмкости.
-type ring struct {
+// lineRing — кольцевой буфер строк фиксированной ёмкости.
+type lineRing struct {
 	mu    sync.Mutex
 	lines []string
 	next  int
 	full  bool
 }
 
-func newRing(capacity int) *ring {
-	return &ring{lines: make([]string, capacity)}
+func newLineRing(capacity int) *lineRing {
+	return &lineRing{lines: make([]string, capacity)}
 }
 
 // Write разбирает поток на строки: slog пишет по записи за вызов, но буфер не
 // должен зависеть от этого.
-func (r *ring) Write(p []byte) (int, error) {
+func (r *lineRing) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -113,7 +121,7 @@ func (r *ring) Write(p []byte) (int, error) {
 }
 
 // Lines отдаёт копию: вызывающий не должен менять буфер под рукой писателя.
-func (r *ring) Lines() []string {
+func (r *lineRing) Lines() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

@@ -26,7 +26,7 @@ type Config struct {
 
 	// TLS — готовый сертификат из настроек панели. Ядро его не выпускает:
 	// за сертификаты отвечает отдельная подсистема.
-	TLS *tls.Config
+	TLS tls.Certificate
 
 	// ObfsPassword включает обфускацию salamander. Пустая строка — выключена.
 	ObfsPassword string
@@ -106,7 +106,7 @@ func Start(cfg Config) (*Server, error) {
 
 	s := &Server{core: core, conn: packetConn, done: make(chan error, 1)}
 	go func() {
-		err := s.core.Serve()
+		err := serveOnce(s.core)
 		if s.stopping.Load() {
 			err = nil
 		}
@@ -142,6 +142,19 @@ func (s *Server) Stop() error {
 	return err
 }
 
+// serveOnce прогоняет Serve и превращает панику ядра в ошибку. У панели нет ни
+// watchdog, ни супервизора: необработанная паника убила бы весь процесс вместе с
+// интерфейсом, а так падение хотя бы попадёт в журнал.
+func serveOnce(core server.Server) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("паника ядра: %v", r)
+		}
+	}()
+
+	return core.Serve()
+}
+
 // obfuscate накрывает сокет обфускацией salamander. Пустой пароль означает, что
 // обфускация выключена и сокет остаётся как есть.
 func obfuscate(conn net.PacketConn, password string) (net.PacketConn, error) {
@@ -158,14 +171,12 @@ func obfuscate(conn net.PacketConn, password string) (net.PacketConn, error) {
 }
 
 // tlsConfigOf переносит сертификат из настроек панели в словарь ядра.
-func tlsConfigOf(cfg *tls.Config) server.TLSConfig {
-	if cfg == nil {
+func tlsConfigOf(cert tls.Certificate) server.TLSConfig {
+	if cert.PrivateKey == nil {
 		return server.TLSConfig{}
 	}
-	return server.TLSConfig{
-		Certificates:   cfg.Certificates,
-		GetCertificate: cfg.GetCertificate,
-	}
+
+	return server.TLSConfig{Certificates: []tls.Certificate{cert}}
 }
 
 // authAdapter приводит наш интерфейс к тому, что просит ядро.

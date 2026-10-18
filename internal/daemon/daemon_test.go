@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/daemon"
+	"github.com/vibecodinguser/hysteria-ward/internal/logging"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
 )
 
@@ -28,11 +29,15 @@ func newFakeCore() *fakeCore {
 	return &fakeCore{done: make(chan error, 1), started: make(chan struct{})}
 }
 
+// Stop повторяет поведение настоящего ядра: остановка завершает Done.
 func (f *fakeCore) Stop() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.stopped = true
+	if !f.stopped {
+		f.stopped = true
+		close(f.done)
+	}
 
 	return nil
 }
@@ -75,10 +80,8 @@ func startPanel(t *testing.T) *panel {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- daemon.Run(ctx, daemon.Options{
-			DBPath:     p.dbPath,
-			LogPath:    p.logPath,
-			MaxLogSize: 1 << 20,
-			LogLines:   100,
+			DBPath: p.dbPath,
+			Log:    logging.Options{Path: p.logPath, MaxSize: 1 << 20, Lines: 100},
 			StartCore: func() (daemon.Core, error) {
 				close(p.core.started)
 				return p.core, nil
@@ -181,10 +184,8 @@ func TestCoreStartErrorIsReported(t *testing.T) {
 	logPath := filepath.Join(dir, "panel.log")
 
 	err := daemon.Run(context.Background(), daemon.Options{
-		DBPath:     filepath.Join(dir, "hysteria-ward.db"),
-		LogPath:    logPath,
-		MaxLogSize: 1 << 20,
-		LogLines:   100,
+		DBPath: filepath.Join(dir, "hysteria-ward.db"),
+		Log:    logging.Options{Path: logPath, MaxSize: 1 << 20, Lines: 100},
 		StartCore: func() (daemon.Core, error) {
 			return nil, errors.New("порт занят")
 		},

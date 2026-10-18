@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/logging"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
@@ -21,12 +22,17 @@ type Core interface {
 	Done() <-chan error
 }
 
+// stopTimeout — сколько панель ждёт, пока ядро отпустит ресурсы. Без предела
+// остановка могла бы зависнуть навсегда.
+const stopTimeout = 5 * time.Second
+
 // Options — что открыть и кого запустить.
 type Options struct {
-	DBPath     string
-	LogPath    string
-	MaxLogSize int64
-	LogLines   int
+	// DBPath — файл базы.
+	DBPath string
+
+	// Log — куда писать журнал.
+	Log logging.Options
 
 	// StartCore поднимает ядро. Отдельным полем, а не прямой зависимостью:
 	// тест подставляет сюда падающее ядро и проверяет, что панель выживает.
@@ -40,11 +46,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 		return errors.New("не задан запуск ядра")
 	}
 
-	log, err := logging.Open(logging.Options{
-		Path:    opts.LogPath,
-		MaxSize: opts.MaxLogSize,
-		Lines:   opts.LogLines,
-	})
+	log, err := logging.Open(opts.Log)
 	if err != nil {
 		return err
 	}
@@ -66,16 +68,28 @@ func Run(ctx context.Context, opts Options) (err error) {
 
 	logger.Info("ядро запущено")
 
+	// coreDone == nil означает, что ядро уже завершилось: останавливать нечего,
+	// и панель просто ждёт сигнала. Это единственный признак живости ядра.
 	coreDone := core.Done()
-	alive := true
 
 	for {
 		select {
 		case <-ctx.Done():
-			if alive {
+			if coreDone != nil {
 				if err := core.Stop(); err != nil {
 					logger.Error("ядро не остановилось", "err", err)
 					return fmt.Errorf("остановка ядра: %w", err)
+				}
+
+				// Ждём, пока ядро действительно отпустит ресурсы: его горутины
+				// могут ещё писать в журнал, который мы сейчас закроем.
+				select {
+				case err := <-coreDone:
+					if err != nil {
+						logger.Error("ядро упало при остановке", "err", err)
+					}
+				case <-time.After(stopTimeout):
+					logger.Error("ядро не отпустило ресурсы вовремя")
 				}
 			}
 
@@ -83,7 +97,6 @@ func Run(ctx context.Context, opts Options) (err error) {
 			return nil
 
 		case err := <-coreDone:
-			alive = false
 			coreDone = nil
 
 			if err == nil {

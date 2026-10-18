@@ -11,6 +11,7 @@ import (
 	"github.com/vibecodinguser/hysteria-ward/internal/build"
 	"github.com/vibecodinguser/hysteria-ward/internal/daemon"
 	"github.com/vibecodinguser/hysteria-ward/internal/hycore"
+	"github.com/vibecodinguser/hysteria-ward/internal/logging"
 )
 
 // usage — справка. Имя программы подставляется из build.Name, чтобы оно
@@ -91,17 +92,12 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 
 	err = daemon.Run(ctx, daemon.Options{
-		DBPath:     *dbPath,
-		LogPath:    *logPath,
-		MaxLogSize: 10 << 20,
-		LogLines:   1000,
+		DBPath: *dbPath,
+		Log:    logging.Options{Path: *logPath},
 		StartCore: func() (daemon.Core, error) {
 			return hycore.Start(hycore.Config{
-				ListenAddr: *listenAddr,
-				TLS: &tls.Config{
-					Certificates: []tls.Certificate{certificate},
-					MinVersion:   tls.VersionTLS12,
-				},
+				ListenAddr:    *listenAddr,
+				TLS:           certificate,
 				Authenticator: noUsers{},
 				Traffic:       noTraffic{},
 			})

@@ -274,7 +274,7 @@ func TestStopClosesDone(t *testing.T) {
 func TestStartWithoutAuthenticatorFails(t *testing.T) {
 	srv, err := hycore.Start(hycore.Config{
 		ListenAddr: "127.0.0.1:0",
-		TLS:        testTLSConfig(),
+		TLS:        testCert().tls,
 	})
 	if err == nil {
 		_ = srv.Stop()
@@ -288,7 +288,7 @@ func TestStartWithoutAuthenticatorFails(t *testing.T) {
 func TestStartWithoutTrafficRecorderFails(t *testing.T) {
 	srv, err := hycore.Start(hycore.Config{
 		ListenAddr:    "127.0.0.1:0",
-		TLS:           testTLSConfig(),
+		TLS:           testCert().tls,
 		Authenticator: fakeAuth{"secret": "alice"},
 	})
 	if err == nil {
@@ -324,8 +324,8 @@ func startServer(t *testing.T, cfg hycore.Config) *hycore.Server {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = "127.0.0.1:0"
 	}
-	if cfg.TLS == nil {
-		cfg.TLS = testTLSConfig()
+	if cfg.TLS.PrivateKey == nil {
+		cfg.TLS = testCert().tls
 	}
 	if cfg.Traffic == nil {
 		cfg.Traffic = newFakeTraffic()
@@ -420,11 +420,6 @@ var testCert = sync.OnceValue(func() testCertificate {
 type testCertificate struct {
 	tls  tls.Certificate
 	leaf *x509.Certificate
-}
-
-// testTLSConfig — настройки сервера с тестовым сертификатом.
-func testTLSConfig() *tls.Config {
-	return &tls.Config{Certificates: []tls.Certificate{testCert().tls}}
 }
 
 // trustingClient — клиент, который доверяет тестовому сертификату и потому
