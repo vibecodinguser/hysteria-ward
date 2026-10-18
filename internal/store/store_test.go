@@ -5,8 +5,45 @@ import (
 	"path/filepath"
 	"testing"
 
+	bolt "go.etcd.io/bbolt"
+
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
 )
+
+// TestOpenCreatesAllSchemaBuckets — схема заводит все бакеты из раздела 4 плана,
+// а не только те, что понадобились первыми. Проверяем чужими глазами: открываем
+// тот же файл тем же bbolt, что и сама панель.
+func TestOpenCreatesAllSchemaBuckets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hysteria-ward.db")
+
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() = %v", err)
+	}
+
+	db, err := bolt.Open(path, 0o600, &bolt.Options{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("база не открылась на чтение: %v", err)
+	}
+	defer db.Close()
+
+	want := []string{"meta", "config", "users", "sessions", "appstate", "metrics", "events"}
+	err = db.View(func(tx *bolt.Tx) error {
+		for _, name := range want {
+			if tx.Bucket([]byte(name)) == nil {
+				t.Errorf("нет бакета %q", name)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("View() = %v", err)
+	}
+}
 
 // TestOpenCreatesAndReopensDatabase — база создаётся при первом запуске и
 // переживает перезапуск панели: версия схемы читается из неё же, а не берётся
