@@ -1,0 +1,104 @@
+package store
+
+import (
+	"encoding/binary"
+	"os"
+	"path/filepath"
+	"testing"
+
+	bolt "go.etcd.io/bbolt"
+)
+
+// TestMigrationAppliesStepsAndBacksUp — механизм миграций целиком: старая база
+// доводится до текущей версии, данные целы, а перед этим появляется копия.
+//
+// Настоящих миграций пока нет — схема только появилась, — поэтому список шагов
+// и целевую версию подменяем: иначе механизм нечем проверить.
+func TestMigrationAppliesStepsAndBacksUp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hysteria-ward.db")
+	prepareOldDatabase(t, path)
+
+	restore := migrations
+	migrations = []func(tx *bolt.Tx) error{
+		func(tx *bolt.Tx) error {
+			_, err := tx.CreateBucketIfNotExists(bucketEvents)
+			return err
+		},
+	}
+	oldVersion := schemaVersion
+	schemaVersion = 2
+	t.Cleanup(func() {
+		migrations = restore
+		schemaVersion = oldVersion
+	})
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() = %v, ожидалась миграция", err)
+	}
+	defer s.Close()
+
+	version, err := s.SchemaVersion()
+	if err != nil {
+		t.Fatalf("SchemaVersion() = %v", err)
+	}
+	if version != 2 {
+		t.Errorf("версия схемы %d, ожидалась 2", version)
+	}
+
+	if _, err := os.Stat(path + ".backup-v1"); err != nil {
+		t.Errorf("копия базы перед миграцией не создана: %v", err)
+	}
+
+	err = s.db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketEvents) == nil {
+			t.Error("миграция не завела бакет events")
+		}
+
+		if got := string(tx.Bucket(bucketUsers).Get([]byte("alice"))); got != "secret" {
+			t.Errorf("данные пользователя после миграции %q, ожидались %q", got, "secret")
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("View() = %v", err)
+	}
+}
+
+// prepareOldDatabase создаёт базу предыдущей версии схемы с данными, которые
+// миграция трогать не должна.
+func prepareOldDatabase(t *testing.T, path string) {
+	t.Helper()
+
+	db, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatalf("старая база не открылась: %v", err)
+	}
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		meta, err := tx.CreateBucketIfNotExists(bucketMeta)
+		if err != nil {
+			return err
+		}
+
+		var version [8]byte
+		binary.BigEndian.PutUint64(version[:], 1)
+		if err := meta.Put(keySchemaVersion, version[:]); err != nil {
+			return err
+		}
+
+		users, err := tx.CreateBucketIfNotExists(bucketUsers)
+		if err != nil {
+			return err
+		}
+
+		return users.Put([]byte("alice"), []byte("secret"))
+	})
+	if err != nil {
+		t.Fatalf("подготовка старой базы: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("закрытие старой базы: %v", err)
+	}
+}

@@ -151,6 +151,10 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("не хватает миграций: есть %d, нужно %d", len(migrations), schemaVersion-1)
 	}
 
+	if err := s.backup(from); err != nil {
+		return err
+	}
+
 	return s.db.Update(func(tx *bolt.Tx) error {
 		for version := from; version < schemaVersion; version++ {
 			step := migrations[version-1]
@@ -161,6 +165,41 @@ func (s *Store) migrate() error {
 
 		return writeMeta(tx)
 	})
+}
+
+// backup снимает копию базы перед миграцией. Копируется не файл, а транзакция:
+// файл на диске в этот момент открыт и меняется, а WriteTo даёт согласованный
+// снимок. Копия доходит до диска раньше, чем начнётся миграция.
+func (s *Store) backup(from int) error {
+	name := fmt.Sprintf("%s.backup-v%d", s.path, from)
+
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("копия базы %q: %w", name, err)
+	}
+
+	err = s.db.View(func(tx *bolt.Tx) error {
+		if _, err := tx.WriteTo(f); err != nil {
+			return fmt.Errorf("копия базы %q: %w", name, err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("копия базы %q: %w", name, err)
+	}
+
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("копия базы %q: %w", name, err)
+	}
+
+	return nil
 }
 
 // isFresh сообщает, что файла базы ещё нет: значит, база создаётся с нуля и
