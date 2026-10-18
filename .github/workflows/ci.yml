@@ -1,13 +1,17 @@
 name: CI
 
-# Образ раннера закреплён явно: `ubuntu-latest` мигрирует на Ubuntu 26
-# (анонс от 2026-10-19), а такая миграция не должна менять поведение
-# сборки неожиданно. Обновлять — осознанно, отдельным коммитом.
+# Проверки идут на self-hosted раннере в локальной лаборатории: облачные
+# раннеры аккаунту недоступны. Метка hysteria-ward-ci задаётся при регистрации
+# раннера — по ней задачи и находят эту машину.
+#
+# Триггера pull_request здесь сознательно нет. Раннер стоит в домашней сети, а
+# репозиторий публичный: работа на pull_request позволила бы любому, кто откроет
+# PR, исполнить свой код на этой машине. push в main и ручной запуск требуют
+# прав на запись, поэтому чужих среди запускающих не бывает.
 
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -16,7 +20,7 @@ permissions:
 jobs:
   test:
     name: Тесты (Go ${{ matrix.go-version }})
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, hysteria-ward-ci]
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +42,7 @@ jobs:
 
   lint:
     name: Линтер
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, hysteria-ward-ci]
     steps:
       - uses: actions/checkout@v4
 
@@ -56,7 +60,7 @@ jobs:
 
   build:
     name: Сборка linux/${{ matrix.goarch }}
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, hysteria-ward-ci]
     strategy:
       fail-fast: false
       matrix:
