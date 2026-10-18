@@ -11,5 +11,14 @@
   "logs_hint": "Здесь появятся последние строки журнала.",
   "not_found_title": "Страница не найдена",
   "not_found_hint": "Такого адреса в панели нет.",
-  "to_overview": "На главную"
+  "to_overview": "На главную",
+  "session_loading": "Проверяем вход…",
+  "session_logout": "Выйти",
+  "session_unreachable": "Панель не отвечает",
+  "login_title": "Вход в панель",
+  "login_hint": "Без входа панель не показывает ни состояния сервера, ни пользователей.",
+  "login_name": "Имя",
+  "login_password": "Пароль",
+  "login_submit": "Войти",
+  "login_submitting": "Входим…"
 }
