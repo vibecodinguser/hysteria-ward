@@ -1,5 +1,9 @@
 name: CI
 
+# Образ раннера закреплён явно: `ubuntu-latest` мигрирует на Ubuntu 26
+# (анонс от 2026-10-19), а такая миграция не должна менять поведение
+# сборки неожиданно. Обновлять — осознанно, отдельным коммитом.
+
 on:
   push:
     branches: [main]
@@ -12,7 +16,7 @@ permissions:
 jobs:
   test:
     name: Тесты (Go ${{ matrix.go-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -34,7 +38,7 @@ jobs:
 
   lint:
     name: Линтер
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -52,7 +56,7 @@ jobs:
 
   build:
     name: Сборка linux/${{ matrix.goarch }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
