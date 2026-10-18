@@ -16,7 +16,7 @@ import (
 // и целевую версию подменяем: иначе механизм нечем проверить.
 func TestMigrationAppliesStepsAndBacksUp(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hysteria-ward.db")
-	prepareOldDatabase(t, path)
+	prepareDatabase(t, path, 1)
 
 	restore := migrations
 	migrations = []func(tx *bolt.Tx) error{
@@ -66,9 +66,22 @@ func TestMigrationAppliesStepsAndBacksUp(t *testing.T) {
 	}
 }
 
-// prepareOldDatabase создаёт базу предыдущей версии схемы с данными, которые
+// TestOpenRejectsNewerSchema — база от более новой панели не открывается:
+// старая панель не понимает её схему и, мигрируя вслепую, испортила бы данные.
+func TestOpenRejectsNewerSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hysteria-ward.db")
+	prepareDatabase(t, path, schemaVersion+1)
+
+	s, err := Open(path)
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("база новее панели открылась, ожидалась ошибка")
+	}
+}
+
+// prepareDatabase создаёт базу с заданной версией схемы и данными, которые
 // миграция трогать не должна.
-func prepareOldDatabase(t *testing.T, path string) {
+func prepareDatabase(t *testing.T, path string, version int) {
 	t.Helper()
 
 	db, err := bolt.Open(path, 0o600, nil)
@@ -82,9 +95,9 @@ func prepareOldDatabase(t *testing.T, path string) {
 			return err
 		}
 
-		var version [8]byte
-		binary.BigEndian.PutUint64(version[:], 1)
-		if err := meta.Put(keySchemaVersion, version[:]); err != nil {
+		var raw [8]byte
+		binary.BigEndian.PutUint64(raw[:], uint64(version))
+		if err := meta.Put(keySchemaVersion, raw[:]); err != nil {
 			return err
 		}
 

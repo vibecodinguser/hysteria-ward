@@ -142,7 +142,7 @@ func (s *Store) migrate() error {
 
 	switch {
 	case from == schemaVersion:
-		return s.touchAppVersion()
+		return s.db.Update(writeMeta)
 	case from > schemaVersion:
 		return fmt.Errorf("база версии схемы %d новее панели (%d): обновите панель", from, schemaVersion)
 	}
@@ -269,15 +269,4 @@ func readSchemaVersion(tx *bolt.Tx) (int, error) {
 	}
 
 	return int(binary.BigEndian.Uint64(raw)), nil
-}
-
-func (s *Store) touchAppVersion() error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucketMeta)
-		if b == nil {
-			return errors.New("нет бакета meta")
-		}
-
-		return b.Put(keyAppVersion, []byte(build.Current().Version))
-	})
 }

@@ -3,6 +3,7 @@ package store_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	bolt "go.etcd.io/bbolt"
@@ -84,5 +85,37 @@ func TestOpenCreatesAndReopensDatabase(t *testing.T) {
 	}
 	if reopened != version {
 		t.Errorf("после перезапуска версия схемы %d, была %d", reopened, version)
+	}
+}
+
+// TestNoBackupWhenSchemaIsCurrent — если мигрировать нечего, копия не создаётся:
+// иначе каждый запуск панели плодил бы бэкапы на пустом месте.
+func TestNoBackupWhenSchemaIsCurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hysteria-ward.db")
+
+	first, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close() = %v", err)
+	}
+
+	second, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("повторный Open() = %v", err)
+	}
+	defer second.Close()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() = %v", err)
+	}
+
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".backup-") {
+			t.Errorf("создана копия %q, хотя миграция не требовалась", entry.Name())
+		}
 	}
 }
