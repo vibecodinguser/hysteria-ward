@@ -249,6 +249,25 @@ func freeUDPPort(t *testing.T) int {
 	return conn.LocalAddr().(*net.UDPAddr).Port
 }
 
+// TestStopClosesDone — остановка закрывает канал завершения без ошибки: панель
+// должна отличать собственный Stop от аварии ядра.
+func TestStopClosesDone(t *testing.T) {
+	srv := startServer(t, hycore.Config{Authenticator: fakeAuth{}})
+
+	if err := srv.Stop(); err != nil {
+		t.Fatalf("Stop() = %v", err)
+	}
+
+	select {
+	case err := <-srv.Done():
+		if err != nil {
+			t.Errorf("Done() = %v, при остановке ожидалось nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done() не закрылся после Stop()")
+	}
+}
+
 // TestStartWithoutAuthenticatorFails — панель обязана сказать, кто такой
 // пользователь. Без этого первый же клиент уронил бы ядро, причём в отдельной
 // горутине, то есть панель бы даже не поняла, что случилось.

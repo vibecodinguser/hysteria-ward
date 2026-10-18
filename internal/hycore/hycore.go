@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
+	"sync/atomic"
 
 	"github.com/apernet/hysteria/core/v2/server"
 	"github.com/apernet/hysteria/extras/v2/obfs"
@@ -57,8 +59,11 @@ type TrafficRecorder interface {
 
 // Server — запущенное ядро.
 type Server struct {
-	core server.Server
-	conn net.PacketConn
+	core     server.Server
+	conn     net.PacketConn
+	done     chan error
+	stopping atomic.Bool
+	stopOnce sync.Once
 }
 
 // Start поднимает ядро и начинает принимать подключения.
@@ -99,10 +104,16 @@ func Start(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("ядро не поднялось: %w", err)
 	}
 
-	s := &Server{core: core, conn: packetConn}
-	// Ошибку Serve сообщить пока некуда: канал для событий ядра появится вместе
-	// с его жизненным циклом.
-	go func() { _ = s.core.Serve() }()
+	s := &Server{core: core, conn: packetConn, done: make(chan error, 1)}
+	go func() {
+		err := s.core.Serve()
+		if s.stopping.Load() {
+			err = nil
+		}
+
+		s.done <- err
+		close(s.done)
+	}()
 
 	return s, nil
 }
@@ -112,9 +123,23 @@ func (s *Server) Addr() net.Addr {
 	return s.conn.LocalAddr()
 }
 
-// Stop останавливает ядро и разрывает активные соединения.
+// Done закрывается, когда ядро перестало обслуживать. Ошибка в канале — причина
+// падения; nil, если сервер остановили через Stop.
+func (s *Server) Done() <-chan error {
+	return s.done
+}
+
+// Stop останавливает ядро и разрывает активные соединения. Повторный вызов
+// безопасен: завершение уже остановленного сервера — не ошибка.
 func (s *Server) Stop() error {
-	return s.core.Close()
+	s.stopping.Store(true)
+
+	var err error
+	s.stopOnce.Do(func() {
+		err = s.core.Close()
+	})
+
+	return err
 }
 
 // obfuscate накрывает сокет обфускацией salamander. Пустой пароль означает, что
