@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/apernet/hysteria/core/v2/client"
+	coreErrs "github.com/apernet/hysteria/core/v2/errors"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/hycore"
 )
@@ -35,15 +37,9 @@ func TestServerProxiesTCPToTarget(t *testing.T) {
 	echoAddr, closeEcho := startEchoServer(t)
 	defer closeEcho()
 
-	srv, err := hycore.Start(hycore.Config{
-		ListenAddr:    "127.0.0.1:0",
-		TLS:           testTLSConfig(t),
+	srv := startServer(t, hycore.Config{
 		Authenticator: fakeAuth{"secret": "alice"},
 	})
-	if err != nil {
-		t.Fatalf("Start() = %v, ожидался запуск сервера", err)
-	}
-	defer srv.Stop()
 
 	c, _, err := client.NewClient(&client.Config{
 		ServerAddr: srv.Addr(),
@@ -73,6 +69,52 @@ func TestServerProxiesTCPToTarget(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Errorf("через прокси вернулось %q, ожидалось %q", got, want)
 	}
+}
+
+// TestServerRejectsUnknownPassword — неизвестный пароль не проходит: наш
+// Authenticator спрашивают, и его отказ доходит до клиента.
+func TestServerRejectsUnknownPassword(t *testing.T) {
+	srv := startServer(t, hycore.Config{
+		Authenticator: fakeAuth{"secret": "alice"},
+	})
+
+	c, _, err := client.NewClient(&client.Config{
+		ServerAddr: srv.Addr(),
+		Auth:       "wrong",
+		TLSConfig:  client.TLSConfig{InsecureSkipVerify: true},
+	})
+	if err == nil {
+		_ = c.Close()
+		t.Fatal("клиент с неизвестным паролем подключился, ожидался отказ")
+	}
+
+	// Именно отказ авторизации, а не любая другая ошибка: иначе тест проходил
+	// бы и на неработающем сервере.
+	var authErr coreErrs.AuthError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("клиент получил %v, ожидался отказ авторизации", err)
+	}
+}
+
+// startServer поднимает сервер и убирает его за собой. Тесты задают только то,
+// что относится к их сценарию: адрес и сертификат подставляются по умолчанию.
+func startServer(t *testing.T, cfg hycore.Config) *hycore.Server {
+	t.Helper()
+
+	if cfg.ListenAddr == "" {
+		cfg.ListenAddr = "127.0.0.1:0"
+	}
+	if cfg.TLS == nil {
+		cfg.TLS = testTLSConfig(t)
+	}
+
+	srv, err := hycore.Start(cfg)
+	if err != nil {
+		t.Fatalf("Start() = %v, ожидался запуск сервера", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	return srv
 }
 
 // startEchoServer поднимает TCP-сервер, возвращающий всё, что получил.
