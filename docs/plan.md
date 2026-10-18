@@ -27,7 +27,7 @@
 | Ядро Hysteria | **in-process**, импорт `github.com/apernet/hysteria/core/v2` | ADR-0001 |
 | Хранилище | **bbolt** (pure Go), версия схемы + миграции + автобэкап | ADR-0002 |
 | Платформы | **`x86_64`** основная, **`aarch64`** вторичная | ADR-0003 |
-| Фронтенд | Svelte + Vite + Tailwind v4, SPA, `go:embed`; **SvelteKit не используем**; i18n-каркас (RU заполняется) | SSR и серверный слой не нужны |
+| Фронтенд | Svelte + Vite + Tailwind v4, SPA, `go:embed`; **SvelteKit не используем**; i18n — **Paraglide**, RU заполняется | SSR и серверный слой не нужны |
 | Транспорт UI | **HTTPS на домене `panel.<домен>`**, сертификат ACME | ADR-0010 |
 | Аутентификация | **обязательна**; Argon2id, cookie-сессии, CSRF, задержка при переборе | ADR-0010 |
 | Режим доступа | по умолчанию панель слушает `127.0.0.1` и доступна только через SSH-туннель; публичный доступ включается явно | — |
@@ -56,7 +56,7 @@ internal/certs/          ACME, self-signed, pinSHA256
 internal/metrics/        агрегация и история (1ч/5с, 3ч/15с, 24ч/1м, 7д/5м)
 internal/api/            REST + SSE
 internal/ui/             встроенная SPA (go:embed)
-web/                     исходники Svelte + Vite + Tailwind
+web/                     исходники Svelte + Vite + Tailwind + Paraglide
 packaging/               install.sh, update.sh, systemd-юнит
 ```
 
