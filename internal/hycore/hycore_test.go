@@ -249,6 +249,20 @@ func freeUDPPort(t *testing.T) int {
 	return conn.LocalAddr().(*net.UDPAddr).Port
 }
 
+// TestStartWithoutAuthenticatorFails — панель обязана сказать, кто такой
+// пользователь. Без этого первый же клиент уронил бы ядро, причём в отдельной
+// горутине, то есть панель бы даже не поняла, что случилось.
+func TestStartWithoutAuthenticatorFails(t *testing.T) {
+	srv, err := hycore.Start(hycore.Config{
+		ListenAddr: "127.0.0.1:0",
+		TLS:        testTLSConfig(t),
+	})
+	if err == nil {
+		_ = srv.Stop()
+		t.Fatal("сервер поднялся без источника пользователей, ожидалась ошибка")
+	}
+}
+
 // startServer поднимает сервер и убирает его за собой. Тесты задают только то,
 // что относится к их сценарию: адрес и сертификат подставляются по умолчанию.
 func startServer(t *testing.T, cfg hycore.Config) *hycore.Server {

@@ -8,6 +8,7 @@ package hycore
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 
@@ -61,6 +62,10 @@ type Server struct {
 
 // Start поднимает ядро и начинает принимать подключения.
 func Start(cfg Config) (*Server, error) {
+	if cfg.Authenticator == nil {
+		return nil, errors.New("не задан источник пользователей")
+	}
+
 	addr, err := net.ResolveUDPAddr("udp", cfg.ListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("разбор адреса %q: %w", cfg.ListenAddr, err)
@@ -93,6 +98,8 @@ func Start(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{core: core, conn: packetConn}
+	// Ошибку Serve сообщить пока некуда: канал для событий ядра появится вместе
+	// с его жизненным циклом.
 	go func() { _ = s.core.Serve() }()
 
 	return s, nil
