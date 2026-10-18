@@ -7,6 +7,7 @@ require (
 	github.com/apernet/hysteria/extras/v2 v2.13.0
 	go.etcd.io/bbolt v1.5.0
 	go.yaml.in/yaml/v3 v3.0.5
+	golang.org/x/crypto v0.54.0
 )
 
 require (
@@ -17,7 +18,6 @@ require (
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
 	github.com/stretchr/testify v1.12.1 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect

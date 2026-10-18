@@ -109,6 +109,37 @@ func TestOpenRejectsNewerSchema(t *testing.T) {
 	}
 }
 
+// TestOpenAddsNewBuckets — бакет, которого в базе не было, появляется при обычном
+// открытии, а не только при миграции.
+//
+// Добавить бакет можно без шага миграции: он не перекладывает данные и ничем не
+// рискует, а копия базы перед ним была бы платой ни за что. Зато если бы бакеты
+// доводились до текущего набора только при миграции, обновление до этой версии
+// панели оставило бы базу без бакета, и учётные данные было бы некуда записать.
+func TestOpenAddsNewBuckets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hysteria-ward.db")
+	prepareDatabase(t, path, schemaVersion)
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	defer s.Close()
+
+	err = s.db.View(func(tx *bolt.Tx) error {
+		for _, name := range schemaBuckets {
+			if tx.Bucket(name) == nil {
+				t.Errorf("нет бакета %q", name)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("View() = %v", err)
+	}
+}
+
 // prepareDatabase создаёт базу с заданной версией схемы и данными, которые
 // миграция трогать не должна.
 func prepareDatabase(t *testing.T, path string, version int) {

@@ -31,7 +31,7 @@ func TestOpenCreatesAllSchemaBuckets(t *testing.T) {
 	}
 	defer db.Close()
 
-	want := []string{"meta", "config", "users", "sessions", "appstate", "metrics", "events"}
+	want := []string{"meta", "config", "auth", "users", "sessions", "appstate", "metrics", "events"}
 	err = db.View(func(tx *bolt.Tx) error {
 		for _, name := range want {
 			if tx.Bucket([]byte(name)) == nil {

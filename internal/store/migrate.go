@@ -26,7 +26,16 @@ func (s *Store) migrate() error {
 
 	switch {
 	case from == schemaVersion:
-		return s.db.Update(writeMeta)
+		// Бакеты — часть схемы, но добавить бакет можно и без шага миграции: он
+		// ничего не перекладывает и ничем не рискует, поэтому копию ради него не
+		// снимаем, а набор бакетов доводим до текущего.
+		return s.db.Update(func(tx *bolt.Tx) error {
+			if err := createBuckets(tx); err != nil {
+				return err
+			}
+
+			return writeMeta(tx)
+		})
 	case from > schemaVersion:
 		return fmt.Errorf("база версии схемы %d новее панели (%d): обновите панель", from, schemaVersion)
 	}

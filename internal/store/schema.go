@@ -15,6 +15,7 @@ import (
 var (
 	bucketMeta     = []byte("meta")
 	bucketConfig   = []byte("config")
+	bucketAuth     = []byte("auth")
 	bucketUsers    = []byte("users")
 	bucketSessions = []byte("sessions")
 	bucketAppState = []byte("appstate")
@@ -24,7 +25,7 @@ var (
 
 // schemaBuckets — бакеты, которые обязаны существовать в текущей схеме.
 var schemaBuckets = [][]byte{
-	bucketMeta, bucketConfig, bucketUsers, bucketSessions,
+	bucketMeta, bucketConfig, bucketAuth, bucketUsers, bucketSessions,
 	bucketAppState, bucketMetrics, bucketEvents,
 }
 
