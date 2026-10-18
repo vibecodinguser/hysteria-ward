@@ -1,0 +1,67 @@
+# System & OS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon\r\r
+._*
+.Spotlight-V100
+.Trashes
+
+# Version Control & IDEs
+.git/
+.idea/
+.cursor/
+.history/
+.gemini/
+.agents/scratch/
+
+# Dependencies & Package Managers
+node_modules/
+/vendor/
+
+# Build Outputs & Caches
+dist/
+build/
+out/
+bin/
+.svelte-kit/
+.turbo/
+*.tsbuildinfo
+.gradle/
+.kotlin/
+
+# Secrets & Environment Variables
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+
+# Compiled Binaries & Libraries
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+*.zip
+*.tar.gz
+*.rar
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test Coverage & Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+cover.out
+coverage.html
+*.ctxt
+.mtj.tmp/
+hs_err_pid*
+replay_pid*

@@ -1,16 +1,53 @@
-# Compiled class file
+# Operating System Files (macOS)
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon\r\r
+._*
+.Spotlight-V100
+.Trashes
+
+# IDEs and Editors
+# PyCharm / JetBrains (IntelliJ IDEA)
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# Cursor / VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+.history/
+.cursor/
+
+# Google Antigravity
+.gemini/
+.agents/scratch/
+
+# Go
+bin/
+dist/
+/vendor/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+cover.out
+coverage.html
+
+# Kotlin & JVM & Gradle
 *.class
-
-# Log file
 *.log
-
-# BlueJ files
 *.ctxt
-
-# Mobile Tools for Java (J2ME)
 .mtj.tmp/
-
-# Package Files #
 *.jar
 *.war
 *.nar
@@ -18,10 +55,23 @@
 *.zip
 *.tar.gz
 *.rar
-
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
-
-# Kotlin Gradle plugin data, see https://kotlinlang.org/docs/whatsnew20.html#new-directory-for-kotlin-data-in-gradle-projects
 .kotlin/
+.gradle/
+build/
+
+# Node.js, Svelte, SvelteKit & Tailwind CSS
+node_modules/
+.svelte-kit/
+.vercel/
+.netlify/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+.turbo/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
