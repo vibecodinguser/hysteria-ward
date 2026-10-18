@@ -29,6 +29,12 @@ type Core interface {
 	Done() <-chan error
 }
 
+// Panel — HTTPS-сервер интерфейса панели.
+type Panel interface {
+	// Run обслуживает запросы до отмены контекста.
+	Run(ctx context.Context) error
+}
+
 // Options — что открыть и как поднимать ядро.
 type Options struct {
 	// DBPath — файл базы.
@@ -41,6 +47,10 @@ type Options struct {
 	// зависимостью: панель не знает про Hysteria 2 ничего лишнего, а тест
 	// подставляет ядро, которым можно управлять.
 	StartCore func(config.Config) (Core, error)
+
+	// StartPanel поднимает HTTPS-сервер интерфейса по конфигурации. Журнал
+	// передаётся сюда же: серверу есть что сказать о запуске и своих ошибках.
+	StartPanel func(config.Config, *slog.Logger) (Panel, error)
 
 	// Preflight проверяет то, что видно только перед самым запуском — например,
 	// читается ли сертификат. Вызывается до остановки работающего ядра, чтобы
@@ -76,6 +86,9 @@ type failure struct {
 func New(opts Options) (*Daemon, error) {
 	if opts.StartCore == nil {
 		return nil, errors.New("не задан запуск ядра")
+	}
+	if opts.StartPanel == nil {
+		return nil, errors.New("не задан запуск интерфейса")
 	}
 
 	log, err := logging.Open(opts.Log)
@@ -123,12 +136,22 @@ func (d *Daemon) Close() error {
 	return errors.Join(d.db.Close(), d.log.Close())
 }
 
-// Run применяет конфигурацию и работает до отмены контекста (в бою — SIGINT или
-// SIGTERM). Штатное завершение возвращает nil.
+// Run открывает интерфейс, применяет конфигурацию и работает до отмены контекста
+// (в бою — SIGINT или SIGTERM). Штатное завершение возвращает nil.
 //
 // Неудачное применение Run не прерывает: причина уходит в журнал, а панель
-// остаётся доступной, чтобы конфигурацию можно было починить.
+// остаётся доступной, чтобы конфигурацию можно было починить. Недоступный
+// интерфейс, наоборот, прерывает: без него администратору некуда войти, и о
+// поломке лучше узнать тому, кто панель запускал.
 func (d *Daemon) Run(ctx context.Context) error {
+	panelCtx, stopPanel := context.WithCancel(ctx)
+	defer stopPanel()
+
+	panelDone, err := d.openPanel(panelCtx)
+	if err != nil {
+		return err
+	}
+
 	_ = d.Apply()
 
 	for {
@@ -141,8 +164,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 				return err
 			}
 
+			// Интерфейс закрывается последним: он рассказывает о том, что
+			// происходило с ядром.
+			stopPanel()
+
+			if err := <-panelDone; err != nil {
+				return fmt.Errorf("интерфейс остановлен: %w", err)
+			}
+
 			d.logger.Info("панель остановлена")
 			return nil
+
+		case err := <-panelDone:
+			return fmt.Errorf("интерфейс остановлен: %w", err)
 
 		case f := <-d.failures:
 			d.logger.Error("ядро упало", "err", f.err)
@@ -156,8 +190,34 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 }
 
+// openPanel поднимает HTTPS-сервер интерфейса и возвращает канал с кодом его
+// завершения.
+//
+// Конфигурация для интерфейса не проверяется на годность целиком: негодная
+// конфигурация ядра — не причина оставлять администратора без входа.
+func (d *Daemon) openPanel(ctx context.Context) (<-chan error, error) {
+	cfg, err := d.db.Config()
+	if err != nil {
+		return nil, err
+	}
+
+	panel, err := d.opts.StartPanel(cfg, d.logger)
+	if err != nil {
+		return nil, fmt.Errorf("интерфейс не поднялся: %w", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- panel.Run(ctx) }()
+
+	return done, nil
+}
+
 // Apply перечитывает конфигурацию из базы и перезапускает ядро. Активные
 // соединения при этом обрываются — об этом администратора предупреждает интерфейс.
+//
+// Свой слушатель Apply не трогает: адрес и сертификат интерфейса берутся при
+// запуске панели. Смена адреса вступает в силу после перезапуска — открытый
+// канал, по которому пришла сама команда «Применить», рвать нельзя.
 //
 // Всё, что можно проверить до остановки ядра, проверяется до неё: негодная правка
 // не должна уносить с собой работающий сервер. Проверить заранее получается не всё

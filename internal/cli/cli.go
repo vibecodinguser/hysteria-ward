@@ -4,15 +4,21 @@ package cli
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 
+	"github.com/vibecodinguser/hysteria-ward/internal/api"
 	"github.com/vibecodinguser/hysteria-ward/internal/build"
+	"github.com/vibecodinguser/hysteria-ward/internal/certs"
 	"github.com/vibecodinguser/hysteria-ward/internal/config"
 	"github.com/vibecodinguser/hysteria-ward/internal/daemon"
 	"github.com/vibecodinguser/hysteria-ward/internal/hycore"
 	"github.com/vibecodinguser/hysteria-ward/internal/logging"
+	"github.com/vibecodinguser/hysteria-ward/internal/ui"
 )
 
 // usage — справка. Имя программы подставляется из build.Name, чтобы оно
@@ -28,11 +34,12 @@ var usage = fmt.Sprintf(`%[1]s — панель управления серве�
   --help     показать эту справку
 
 Флаги serve:
-  --db   файл базы (по умолчанию /var/lib/hysteria-ward/hysteria-ward.db)
-  --log  файл журнала (по умолчанию /var/log/hysteria-ward/hysteria-ward.log)
+  --db     файл базы (по умолчанию /var/lib/hysteria-ward/hysteria-ward.db)
+  --log    файл журнала (по умолчанию /var/log/hysteria-ward/hysteria-ward.log)
+  --debug  отладочный запуск: если сертификата ещё нет, выписать самоподписанный
 
-Сам сервер настраивается в базе: адрес, сертификат, обфускация и masquerade
-хранятся там и меняются из интерфейса панели.
+Сам сервер настраивается в базе: адрес ядра, адрес панели, сертификат, обфускация
+и masquerade хранятся там и меняются из интерфейса панели.
 `, build.Name)
 
 // Run выполняет команду и возвращает код возврата.
@@ -73,6 +80,7 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 
 	dbPath := fs.String("db", "/var/lib/hysteria-ward/hysteria-ward.db", "файл базы")
 	logPath := fs.String("log", "/var/log/hysteria-ward/hysteria-ward.log", "файл журнала")
+	debug := fs.Bool("debug", false, "отладочный запуск: самоподписанный сертификат, пока нет настоящего")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -83,6 +91,9 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 		Log:       logging.Options{Path: *logPath},
 		StartCore: startCore,
 		Preflight: checkCoreConfig,
+		StartPanel: func(cfg config.Config, logger *slog.Logger) (daemon.Panel, error) {
+			return startPanel(cfg, logger, *debug)
+		},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
@@ -96,6 +107,45 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 
 	return 0
+}
+
+// startPanel собирает HTTPS-сервер интерфейса.
+//
+// Сертификат берётся из настроек — тот же, что и у ядра. В отладочном запуске,
+// если настоящего сертификата ещё нет, выписывается самоподписанный: браузер его
+// не признает, но посмотреть панель до появления домена можно.
+func startPanel(cfg config.Config, logger *slog.Logger, debug bool) (daemon.Panel, error) {
+	certificate, err := loadCertificate(cfg)
+	if err != nil {
+		if !debug {
+			return nil, err
+		}
+
+		logger.Warn("настоящий сертификат не читается, беру самоподписанный", "err", err)
+
+		certificate, err = certs.SelfSigned(panelHosts(cfg.Panel.Listen)...)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return api.New(api.Options{
+		Listen:      cfg.Panel.Listen,
+		Certificate: certificate,
+		Handler:     ui.Handler(),
+		Logger:      logger,
+	})
+}
+
+// panelHosts — имена, которые должен покрывать отладочный сертификат: панель
+// открывают по тому адресу, который она слушает.
+func panelHosts(listen string) []string {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		host = ""
+	}
+
+	return []string{"localhost", host}
 }
 
 // checkCoreConfig проверяет то, что выясняется только перед запуском: читается ли
@@ -128,6 +178,10 @@ func startCore(cfg config.Config) (daemon.Core, error) {
 // loadCertificate читает сертификат панели. Читается при каждом запуске: «Применить»
 // должно подхватывать и новый сертификат.
 func loadCertificate(cfg config.Config) (tls.Certificate, error) {
+	if cfg.TLS.Cert == "" || cfg.TLS.Key == "" {
+		return tls.Certificate{}, errors.New("сертификат: не указано, где он лежит")
+	}
+
 	certificate, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("сертификат: %w", err)

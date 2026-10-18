@@ -3,6 +3,7 @@ package daemon_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,8 +17,8 @@ import (
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
 )
 
-// runnable — конфигурация, годная к запуску. Файлов по этим путям нет: поддельное
-// ядро их не читает.
+// runnable — конфигурация, годная к запуску. Файлов по этим путям нет: поддельные
+// ядро и интерфейс их не читают.
 func runnable() config.Config {
 	cfg := config.Default()
 	cfg.TLS = config.TLS{
@@ -97,11 +98,16 @@ type fakeFactory struct {
 	mu      sync.Mutex
 	configs []config.Config
 	cores   []*fakeCore
+	err     error
 }
 
 func (f *fakeFactory) start(cfg config.Config) (daemon.Core, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.err != nil {
+		return nil, f.err
+	}
 
 	core := newFakeCore()
 	f.configs = append(f.configs, cfg)
@@ -125,6 +131,64 @@ func (f *fakeFactory) lastCore() *fakeCore {
 }
 
 func (f *fakeFactory) lastConfig() config.Config {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.configs[len(f.configs)-1]
+}
+
+// fakePanelRun — подмена запущенного HTTPS-сервера интерфейса: работает, пока не
+// отменят контекст, разве что задана ошибка.
+type fakePanelRun struct {
+	err error
+}
+
+func (p *fakePanelRun) Run(ctx context.Context) error {
+	if p.err != nil {
+		return p.err
+	}
+
+	<-ctx.Done()
+
+	return nil
+}
+
+// fakePanel поднимает поддельные HTTPS-серверы и запоминает, с какой конфигурацией
+// их поднимали.
+type fakePanel struct {
+	mu       sync.Mutex
+	configs  []config.Config
+	startErr error
+	runErr   error
+}
+
+func (f *fakePanel) start(cfg config.Config, logger *slog.Logger) (daemon.Panel, error) {
+	// Журнал обязан дойти до интерфейса: серверу есть что сказать о запуске и
+	// своих ошибках.
+	if logger == nil {
+		return nil, errors.New("журнал не передан")
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.startErr != nil {
+		return nil, f.startErr
+	}
+
+	f.configs = append(f.configs, cfg)
+
+	return &fakePanelRun{err: f.runErr}, nil
+}
+
+func (f *fakePanel) calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return len(f.configs)
+}
+
+func (f *fakePanel) lastConfig() config.Config {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -156,28 +220,31 @@ func (c *certCheck) reject(cert string) {
 	c.badCert = cert
 }
 
-// panel — запущенная панель с поддельным ядром и временными путями.
+// panel — панель с поддельными ядром и интерфейсом и временными путями.
 type panel struct {
 	daemon  *daemon.Daemon
-	fake    *fakeFactory
+	core    *fakeFactory
+	ui      *fakePanel
 	check   *certCheck
 	dir     string
 	dbPath  string
 	logPath string
+	ctx     context.Context
 	cancel  context.CancelFunc
-	done    <-chan error
+	done    chan error
 
 	closed bool
 }
 
-// startPanel готовит базу с готовой конфигурацией, поднимает панель и возвращает
-// её тесту.
-func startPanel(t *testing.T, cfg config.Config) *panel {
+// newPanel готовит базу, панель и подделки, но не запускает панель: тесту нужно
+// успеть настроить подделки.
+func newPanel(t *testing.T, cfg config.Config) *panel {
 	t.Helper()
 
 	dir := t.TempDir()
 	p := &panel{
-		fake:    &fakeFactory{},
+		core:    &fakeFactory{},
+		ui:      &fakePanel{},
 		check:   &certCheck{},
 		dir:     dir,
 		dbPath:  filepath.Join(dir, "hysteria-ward.db"),
@@ -188,10 +255,11 @@ func startPanel(t *testing.T, cfg config.Config) *panel {
 	seedDB(t, p.dbPath, cfg)
 
 	d, err := daemon.New(daemon.Options{
-		DBPath:    p.dbPath,
-		Log:       logging.Options{Path: p.logPath},
-		StartCore: p.fake.start,
-		Preflight: p.check.check,
+		DBPath:     p.dbPath,
+		Log:        logging.Options{Path: p.logPath},
+		StartCore:  p.core.start,
+		StartPanel: p.ui.start,
+		Preflight:  p.check.check,
 	})
 	if err != nil {
 		t.Fatalf("New() = %v", err)
@@ -199,15 +267,18 @@ func startPanel(t *testing.T, cfg config.Config) *panel {
 	p.daemon = d
 	t.Cleanup(func() { p.shutdown(t) })
 
-	ctx, cancel := context.WithCancel(context.Background())
-	p.cancel = cancel
-	t.Cleanup(cancel)
+	p.ctx, p.cancel = context.WithCancel(context.Background())
+	t.Cleanup(p.cancel)
 
-	errCh := make(chan error, 1)
-	p.done = errCh
-	go func() { errCh <- d.Run(ctx) }()
+	p.done = make(chan error, 1)
 
 	return p
+}
+
+// start запускает панель.
+func (p *panel) start() {
+	p.done = make(chan error, 1)
+	go func() { p.done <- p.daemon.Run(p.ctx) }()
 }
 
 // seedDB кладёт конфигурацию в базу до запуска панели — так же, как это сделает
@@ -245,14 +316,14 @@ func (p *panel) shutdown(t *testing.T) {
 func (p *panel) waitForCore(t *testing.T) {
 	t.Helper()
 
-	waitFor(t, func() bool { return p.fake.calls() > 0 })
+	waitFor(t, func() bool { return p.core.calls() > 0 })
 }
 
 // waitForLog ждёт, пока в журнале появится подстрока.
 func (p *panel) waitForLog(t *testing.T, want string) {
 	t.Helper()
 
-	waitFor(t, func() bool { return strings.Contains(p.log(t), want) })
+	waitFor(t, func() bool { return strings.Contains(p.log(), want) })
 }
 
 // wait возвращает код завершения панели или роняет тест по таймауту.
@@ -279,33 +350,33 @@ func (p *panel) stop(t *testing.T) {
 	}
 }
 
-// log читает журнал панели.
-func (p *panel) log(t *testing.T) string {
-	t.Helper()
-
+// log читает журнал панели. Пока журнала нет, он пуст.
+func (p *panel) log() string {
 	content, err := os.ReadFile(p.logPath)
 	if err != nil {
-		t.Fatalf("журнал не прочитан: %v", err)
+		return ""
 	}
 
 	return string(content)
 }
 
 // TestRunStopsOnContextCancel — штатное завершение: отмена контекста (в бою —
-// SIGTERM) останавливает ядро, Run возвращает nil, а лог доходит до диска.
+// SIGTERM) останавливает ядро и закрывает интерфейс, Run возвращает nil, а журнал
+// доходит до диска.
 func TestRunStopsOnContextCancel(t *testing.T) {
-	p := startPanel(t, runnable())
+	p := newPanel(t, runnable())
+	p.start()
 	p.waitForCore(t)
 
 	p.stop(t)
 
-	if !p.fake.lastCore().isStopped() {
+	if !p.core.lastCore().isStopped() {
 		t.Error("ядро не остановлено")
 	}
 	if p.daemon.CoreRunning() {
 		t.Error("ядро считается работающим после остановки")
 	}
-	if log := p.log(t); !strings.Contains(log, "панель остановлена") {
+	if log := p.log(); !strings.Contains(log, "панель остановлена") {
 		t.Errorf("в журнале нет записи об остановке: %q", log)
 	}
 
@@ -323,13 +394,70 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 	}
 }
 
+// TestRunsWithInterfaceFromConfiguration — интерфейс поднимается по конфигурации из
+// базы: адрес панели админ задаёт в настройках, а не в командной строке.
+func TestRunsWithInterfaceFromConfiguration(t *testing.T) {
+	cfg := runnable()
+	cfg.Panel.Listen = "127.0.0.1:10443"
+
+	p := newPanel(t, cfg)
+	p.start()
+
+	waitFor(t, func() bool { return p.ui.calls() > 0 })
+
+	if got := p.ui.lastConfig().Panel.Listen; got != "127.0.0.1:10443" {
+		t.Errorf("интерфейс поднят на %q, ожидался 127.0.0.1:10443", got)
+	}
+
+	p.stop(t)
+}
+
+// TestPanelFailureStopsRun — без интерфейса администратору некуда войти, поэтому о
+// поломке узнаёт тот, кто панель запускал: молча работать сломанной панелью хуже,
+// чем перезапуститься.
+func TestPanelFailureStopsRun(t *testing.T) {
+	p := newPanel(t, runnable())
+	p.ui.startErr = errors.New("порт занят")
+	p.start()
+
+	err := p.wait(t)
+	if err == nil {
+		t.Fatal("Run() = nil, ожидалась ошибка из-за несработавшего интерфейса")
+	}
+	if !strings.Contains(err.Error(), "порт занят") {
+		t.Errorf("Run() = %v, ожидалась причина", err)
+	}
+
+	// Ядро и не пытались поднимать: интерфейс идёт первым.
+	if calls := p.core.calls(); calls != 0 {
+		t.Errorf("ядро поднималось %d раз, хотя интерфейс не встал", calls)
+	}
+}
+
+// TestPanelDeathStopsRun — интерфейс, переставший обслуживать запросы, тоже
+// останавливает панель: снаружи это выглядит как мёртвая панель.
+func TestPanelDeathStopsRun(t *testing.T) {
+	p := newPanel(t, runnable())
+	p.ui.runErr = errors.New("слушатель отвалился")
+	p.start()
+
+	err := p.wait(t)
+	if err == nil {
+		t.Fatal("Run() = nil, ожидалась ошибка")
+	}
+	if !strings.Contains(err.Error(), "интерфейс остановлен") {
+		t.Errorf("Run() = %v, ожидалась причина об интерфейсе", err)
+	}
+}
+
 // TestCrashKeepsPanelAlive — падение ядра попадает в журнал, но панель не
 // выходит: она продолжает работать до сигнала остановки.
 func TestCrashKeepsPanelAlive(t *testing.T) {
-	p := startPanel(t, runnable())
+	p := newPanel(t, runnable())
+	p.start()
 	p.waitForCore(t)
 
-	p.fake.lastCore().crash(errors.New("сокет отвалился"))
+	p.core.lastCore().crash(errors.New("сокет отвалился"))
 
 	waitFor(t, func() bool { return !p.daemon.CoreRunning() })
 
@@ -341,7 +469,7 @@ func TestCrashKeepsPanelAlive(t *testing.T) {
 
 	p.stop(t)
 
-	log := p.log(t)
+	log := p.log()
 	if !strings.Contains(log, "ядро упало") || !strings.Contains(log, "сокет отвалился") {
 		t.Errorf("падение ядра не попало в журнал: %q", log)
 	}
@@ -350,54 +478,26 @@ func TestCrashKeepsPanelAlive(t *testing.T) {
 // TestCoreStartErrorKeepsPanelAlive — ядро не поднялось, но панель работает:
 // иначе администратор не смог бы открыть интерфейс и починить конфигурацию.
 func TestCoreStartErrorKeepsPanelAlive(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "hysteria-ward.db")
-	logPath := filepath.Join(dir, "panel.log")
+	p := newPanel(t, runnable())
+	p.core.err = errors.New("порт занят")
+	p.start()
 
-	seedDB(t, dbPath, runnable())
-
-	d, err := daemon.New(daemon.Options{
-		DBPath: dbPath,
-		Log:    logging.Options{Path: logPath},
-		StartCore: func(config.Config) (daemon.Core, error) {
-			return nil, errors.New("порт занят")
-		},
-	})
-	if err != nil {
-		t.Fatalf("New() = %v", err)
-	}
-	defer d.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	done := make(chan error, 1)
-	go func() { done <- d.Run(ctx) }()
-
-	waitForLogFile(t, logPath, "конфигурация не применена")
+	p.waitForLog(t, "конфигурация не применена")
 
 	select {
-	case err := <-done:
+	case err := <-p.done:
 		t.Fatalf("Run завершился с ошибкой запуска ядра: %v", err)
 	default:
 	}
 
-	if d.CoreRunning() {
+	if p.daemon.CoreRunning() {
 		t.Error("ядро считается работающим, хотя не поднялось")
 	}
 
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Run() = %v, ожидалось штатное завершение", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("панель не завершилась после отмены контекста")
-	}
+	p.stop(t)
 
-	if content, readErr := os.ReadFile(logPath); readErr != nil || !strings.Contains(string(content), "порт занят") {
-		t.Errorf("причина не попала в журнал: %q (%v)", content, readErr)
+	if log := p.log(); !strings.Contains(log, "порт занят") {
+		t.Errorf("причина не попала в журнал: %q", log)
 	}
 }
 
@@ -405,10 +505,11 @@ func TestCoreStartErrorKeepsPanelAlive(t *testing.T) {
 // только по «Применить»: до этого ядро продолжает работать по прежней
 // конфигурации.
 func TestApplyRestartsCoreWithNewConfig(t *testing.T) {
-	p := startPanel(t, runnable())
+	p := newPanel(t, runnable())
+	p.start()
 	p.waitForCore(t)
 
-	first := p.fake.lastCore()
+	first := p.core.lastCore()
 
 	updated := runnable()
 	updated.Obfs = config.Obfs{Password: "salamander"}
@@ -416,7 +517,7 @@ func TestApplyRestartsCoreWithNewConfig(t *testing.T) {
 		t.Fatalf("SaveConfig() = %v", err)
 	}
 
-	if calls := p.fake.calls(); calls != 1 {
+	if calls := p.core.calls(); calls != 1 {
 		t.Fatalf("ядро перезапустилось само: запусков %d", calls)
 	}
 
@@ -424,10 +525,10 @@ func TestApplyRestartsCoreWithNewConfig(t *testing.T) {
 		t.Fatalf("Apply() = %v", err)
 	}
 
-	if calls := p.fake.calls(); calls != 2 {
+	if calls := p.core.calls(); calls != 2 {
 		t.Fatalf("после Apply запусков %d, ожидалось 2", calls)
 	}
-	if got := p.fake.lastConfig().Obfs.Password; got != "salamander" {
+	if got := p.core.lastConfig().Obfs.Password; got != "salamander" {
 		t.Errorf("ядро поднято с obfs-паролем %q, ожидался %q", got, "salamander")
 	}
 	if !first.isStopped() {
@@ -443,12 +544,13 @@ func TestApplyRestartsCoreWithNewConfig(t *testing.T) {
 // TestLateFailureOfPreviousCore — панель узнаёт о падении прежнего ядра уже после
 // того, как подняла новое. Такая весть не должна погасить работающее ядро.
 func TestLateFailureOfPreviousCore(t *testing.T) {
-	p := startPanel(t, runnable())
+	p := newPanel(t, runnable())
+	p.start()
 	p.waitForCore(t)
 
 	// Прежнее ядро «падает» ровно в момент остановки: его Done приходит уже тогда,
 	// когда панель поднимает новое.
-	p.fake.lastCore().crashOnStop = errors.New("сокет отвалился при остановке")
+	p.core.lastCore().crashOnStop = errors.New("сокет отвалился при остановке")
 
 	if err := p.daemon.Apply(); err != nil {
 		t.Fatalf("Apply() = %v", err)
@@ -466,7 +568,8 @@ func TestLateFailureOfPreviousCore(t *testing.T) {
 // TestApplyRejectsInvalidConfig — негодная правка не уносит с собой работающий
 // сервер: конфигурация проверяется до остановки ядра.
 func TestApplyRejectsInvalidConfig(t *testing.T) {
-	p := startPanel(t, runnable())
+	p := newPanel(t, runnable())
+	p.start()
 	p.waitForCore(t)
 
 	broken := runnable()
@@ -480,7 +583,7 @@ func TestApplyRejectsInvalidConfig(t *testing.T) {
 		t.Fatal("Apply() с негодной конфигурацией прошёл, ожидалась ошибка")
 	}
 
-	if calls := p.fake.calls(); calls != 1 {
+	if calls := p.core.calls(); calls != 1 {
 		t.Errorf("ядро поднималось %d раз, ожидался только первоначальный запуск", calls)
 	}
 	if !p.daemon.CoreRunning() {
@@ -493,7 +596,8 @@ func TestApplyRejectsInvalidConfig(t *testing.T) {
 // TestApplyKeepsCoreWhenPreflightFails — ошибка, которую видно только при запуске
 // (нечитаемый сертификат), тоже не должна уносить работающий сервер.
 func TestApplyKeepsCoreWhenPreflightFails(t *testing.T) {
-	p := startPanel(t, runnable())
+	p := newPanel(t, runnable())
+	p.start()
 	p.waitForCore(t)
 
 	unreadable := runnable()
@@ -507,7 +611,7 @@ func TestApplyKeepsCoreWhenPreflightFails(t *testing.T) {
 		t.Fatal("Apply() с нечитаемым сертификатом прошёл, ожидалась ошибка")
 	}
 
-	if calls := p.fake.calls(); calls != 1 {
+	if calls := p.core.calls(); calls != 1 {
 		t.Errorf("ядро поднималось %d раз, ожидался только первоначальный запуск", calls)
 	}
 	if !p.daemon.CoreRunning() {
@@ -531,14 +635,4 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 
 	t.Fatal("условие так и не выполнилось")
-}
-
-// waitForLogFile ждёт появления подстроки в журнале по известному пути.
-func waitForLogFile(t *testing.T, path, want string) {
-	t.Helper()
-
-	waitFor(t, func() bool {
-		content, err := os.ReadFile(path)
-		return err == nil && strings.Contains(string(content), want)
-	})
 }

@@ -6,10 +6,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,86 +103,221 @@ func TestRunWithoutArguments(t *testing.T) {
 	}
 }
 
-// TestRunServeStopsOnContextCancel — полный путь: serve поднимает ядро по
-// конфигурации из базы, отмена контекста (в бою — SIGTERM) завершает панель с
-// кодом 0.
-func TestRunServeStopsOnContextCancel(t *testing.T) {
+// TestRunServeServesInterface — полный путь: serve берёт сертификат из настроек,
+// открывает интерфейс по HTTPS, а отмена контекста (в бою — SIGTERM) завершает
+// панель с кодом 0.
+func TestRunServeServesInterface(t *testing.T) {
 	dir := t.TempDir()
 	certPath, keyPath := writeCertificate(t, dir)
 	dbPath := filepath.Join(dir, "hysteria-ward.db")
 	logPath := filepath.Join(dir, "panel.log")
+	panelAddr := freeAddr(t)
 
 	seedConfig(t, dbPath, config.Config{
 		Listen:     "127.0.0.1:0",
+		Panel:      config.Panel{Listen: panelAddr},
 		TLS:        config.TLS{Cert: certPath, Key: keyPath},
 		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	panel := serve(t, "--db", dbPath, "--log", logPath)
+	waitForLog(t, logPath, "интерфейс открыт")
 
-	var stdout, stderr bytes.Buffer
-	done := make(chan int, 1)
-	go func() {
-		done <- cli.Run(ctx, []string{"serve", "--db", dbPath, "--log", logPath}, &stdout, &stderr)
-	}()
+	// Клиент доверяет ровно тому сертификату, который лежит в настройках: так
+	// проверяется, что панель отдаёт именно его, а не что-нибудь своё.
+	client := trusting(t, certPath)
 
-	waitForLog(t, logPath, "ядро запущено")
-	cancel()
+	status, header, body := get(t, client, "https://"+panelAddr+"/")
+	if status != http.StatusOK {
+		t.Fatalf("GET / = %d, ожидалось 200", status)
+	}
+	if contentType := header.Get("Content-Type"); !strings.HasPrefix(contentType, "text/html") {
+		t.Errorf("Content-Type = %q, ожидался HTML", contentType)
+	}
+	if !strings.Contains(body, `id="app"`) {
+		t.Errorf("точка входа интерфейса не отдана: %q", body)
+	}
 
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("Run(serve) = %d, ожидалось 0; stderr: %q", code, stderr.String())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("панель не завершилась после отмены контекста")
+	// Прямая ссылка на раздел тоже открывается: маршруты знает клиент.
+	if status, _, deepLink := get(t, client, "https://"+panelAddr+"/users"); status != http.StatusOK || deepLink != body {
+		t.Errorf("GET /users = %d, ожидалась та же точка входа", status)
+	}
+
+	// Тот же адрес по открытому HTTP не обслуживается: панель отвечает только по
+	// шифрованному каналу.
+	if status, _, _ := get(t, &http.Client{Timeout: 5 * time.Second}, "http://"+panelAddr+"/"); status != http.StatusBadRequest {
+		t.Errorf("GET по открытому HTTP = %d, ожидался отказ", status)
+	}
+
+	panel.cancel()
+
+	if code := panel.wait(t); code != 0 {
+		t.Fatalf("Run(serve) = %d, ожидалось 0; stderr: %q", code, panel.stderr.String())
 	}
 
 	waitForLog(t, logPath, "панель остановлена")
 }
 
-// TestRunServeRunsWithoutCore — ядро без читаемого сертификата не поднимется, но
-// панель обязана работать: иначе администратор не откроет интерфейс и не починит
-// конфигурацию снаружи.
-func TestRunServeRunsWithoutCore(t *testing.T) {
+// TestRunServeRefusesWithoutCertificate — без сертификата панель не поднимается:
+// самоподписанный годится только для отладки и сам собой не берётся.
+func TestRunServeRefusesWithoutCertificate(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "hysteria-ward.db")
 	logPath := filepath.Join(dir, "panel.log")
 
 	seedConfig(t, dbPath, config.Config{
 		Listen:     "127.0.0.1:0",
+		Panel:      config.Panel{Listen: freeAddr(t)},
 		TLS:        config.TLS{Cert: filepath.Join(dir, "нет.pem"), Key: filepath.Join(dir, "нет.key")},
 		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	panel := serve(t, "--db", dbPath, "--log", logPath)
 
-	var stdout, stderr bytes.Buffer
+	if code := panel.wait(t); code == 0 {
+		t.Fatalf("Run(serve) = 0, ожидался отказ без сертификата")
+	}
+	if !strings.Contains(panel.stderr.String(), "сертификат") {
+		t.Errorf("в stderr нет причины: %q", panel.stderr.String())
+	}
+}
+
+// TestRunServeDebugWithoutCertificate — отладочный запуск поднимает интерфейс с
+// самоподписанным сертификатом: посмотреть панель можно до появления домена.
+func TestRunServeDebugWithoutCertificate(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "hysteria-ward.db")
+	logPath := filepath.Join(dir, "panel.log")
+	panelAddr := freeAddr(t)
+
+	seedConfig(t, dbPath, config.Config{
+		Listen:     "127.0.0.1:0",
+		Panel:      config.Panel{Listen: panelAddr},
+		TLS:        config.TLS{Cert: filepath.Join(dir, "нет.pem"), Key: filepath.Join(dir, "нет.key")},
+		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
+	})
+
+	panel := serve(t, "--db", dbPath, "--log", logPath, "--debug")
+	waitForLog(t, logPath, "интерфейс открыт")
+
+	if log := readLog(t, logPath); !strings.Contains(log, "самоподписанный") {
+		t.Errorf("в журнале нет предупреждения о самоподписанном сертификате: %q", log)
+	}
+
+	// Сертификат самоподписанный, поэтому доверять ему нечем: проверяем сам факт
+	// работы интерфейса.
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+
+	status, _, body := get(t, client, "https://"+panelAddr+"/")
+	if status != http.StatusOK {
+		t.Fatalf("GET / = %d, ожидалось 200", status)
+	}
+	if !strings.Contains(body, `id="app"`) {
+		t.Errorf("точка входа интерфейса не отдана: %q", body)
+	}
+
+	// Ядро при этом не поднялось: отладка интерфейса не повод пускать трафик.
+	if log := readLog(t, logPath); !strings.Contains(log, "конфигурация не применена") {
+		t.Errorf("в журнале нет записи о несработавшем ядре: %q", log)
+	}
+
+	panel.cancel()
+
+	if code := panel.wait(t); code != 0 {
+		t.Fatalf("Run(serve) = %d, ожидалось 0; stderr: %q", code, panel.stderr.String())
+	}
+}
+
+// running — запущенный serve.
+type running struct {
+	done   <-chan int
+	stderr *bytes.Buffer
+	cancel context.CancelFunc
+}
+
+// serve запускает serve с переданными аргументами.
+func serve(t *testing.T, args ...string) *running {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	done := make(chan int, 1)
+	stderr := &bytes.Buffer{}
+
 	go func() {
-		done <- cli.Run(ctx, []string{"serve", "--db", dbPath, "--log", logPath}, &stdout, &stderr)
+		done <- cli.Run(ctx, append([]string{"serve"}, args...), &bytes.Buffer{}, stderr)
 	}()
 
-	waitForLog(t, logPath, "конфигурация не применена")
+	return &running{done: done, stderr: stderr, cancel: cancel}
+}
+
+// wait возвращает код возврата панели или роняет тест по таймауту.
+func (r *running) wait(t *testing.T) int {
+	t.Helper()
 
 	select {
-	case code := <-done:
-		t.Fatalf("панель завершилась без ядра, код %d; stderr: %q", code, stderr.String())
-	default:
+	case code := <-r.done:
+		return code
+	case <-time.After(10 * time.Second):
+		t.Fatal("панель не завершилась")
+		return -1
+	}
+}
+
+// get выполняет запрос и возвращает код ответа, заголовки и тело.
+func get(t *testing.T, client *http.Client, url string) (int, http.Header, string) {
+	t.Helper()
+
+	resp, err := client.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+
+	content, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("тело ответа на GET %s: %v", url, err)
 	}
 
-	cancel()
+	return resp.StatusCode, resp.Header, string(content)
+}
 
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("Run(serve) = %d, ожидалось 0; stderr: %q", code, stderr.String())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("панель не завершилась после отмены контекста")
+// trusting собирает клиента, который доверяет ровно этому сертификату.
+func trusting(t *testing.T, certPath string) *http.Client {
+	t.Helper()
+
+	content, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("сертификат не прочитан: %v", err)
 	}
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(content) {
+		t.Fatalf("сертификат не разобран: %s", certPath)
+	}
+
+	return &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}},
+	}
+}
+
+// freeAddr занимает и сразу освобождает порт: тесту нужен адрес, который панель
+// сможет занять сама.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("свободный порт не найден: %v", err)
+	}
+	defer listener.Close()
+
+	return listener.Addr().String()
 }
 
 // seedConfig кладёт конфигурацию в базу до запуска панели — так же, как это
@@ -197,11 +336,23 @@ func seedConfig(t *testing.T, dbPath string, cfg config.Config) {
 	}
 }
 
+// readLog читает журнал панели.
+func readLog(t *testing.T, path string) string {
+	t.Helper()
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("журнал не прочитан: %v", err)
+	}
+
+	return string(content)
+}
+
 // waitForLog ждёт, пока в журнале появится подстрока.
 func waitForLog(t *testing.T, path, want string) {
 	t.Helper()
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		content, err := os.ReadFile(path)
 		if err == nil && strings.Contains(string(content), want) {
@@ -214,7 +365,8 @@ func waitForLog(t *testing.T, path, want string) {
 	t.Fatalf("в журнале так и не появилось %q", want)
 }
 
-// writeCertificate готовит самоподписанный сертификат для запуска ядра в тесте.
+// writeCertificate готовит самоподписанный сертификат для запуска панели в тесте.
+// Сертификат покрывает петлю: панель в тесте слушает 127.0.0.1.
 func writeCertificate(t *testing.T, dir string) (certPath, keyPath string) {
 	t.Helper()
 
@@ -231,6 +383,7 @@ func writeCertificate(t *testing.T, dir string) (certPath, keyPath string) {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:     []string{"hysteria-ward.test"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
