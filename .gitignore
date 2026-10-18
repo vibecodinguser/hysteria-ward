@@ -13,7 +13,7 @@ Icon\r\r
 *.iws
 *.iml
 *.ipr
-out/
+/out/
 
 # Cursor / VS Code
 .vscode/*
@@ -30,8 +30,8 @@ out/
 .agents/scratch/
 
 # Go
-bin/
-dist/
+/bin/
+/dist/
 /vendor/
 *.exe
 *.exe~
@@ -59,7 +59,7 @@ hs_err_pid*
 replay_pid*
 .kotlin/
 .gradle/
-build/
+/build/
 
 # Node.js, Svelte, SvelteKit & Tailwind CSS
 node_modules/
