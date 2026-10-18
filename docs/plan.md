@@ -41,14 +41,14 @@
 | Обновление | `update.sh`: версионирование, идемпотентные миграции, `--dry-run`/`--status`/`--repair` | ADR-0011 |
 | MCP | **разрешён**, отдельным этапом | ADR-0012 |
 | Дистрибуция | GitHub Releases + `install.sh` | ADR-0008 |
-| Автозапуск | systemd (`hysteria2-manager.service`) | — |
+| Автозапуск | systemd (`hysteria-ward.service`) | — |
 | Логи | кольцевой буфер в памяти (страница логов в UI) + файл с ротацией | — |
 | Тестирование | loopback-e2e (сервер + клиент в одном процессе) обязателен с первого дня | — |
 
 ## 3. Структура репозитория и границы модулей
 
 ```
-cmd/hysteria2-manager/   точка входа, парсинг флагов, подъём подсистем
+cmd/hysteria-ward/       точка входа, парсинг флагов, подъём подсистем
 internal/hycore/         обёртка над ядром Hysteria 2 (in-process), хуки Authenticator/TrafficLogger
 internal/store/          bbolt: схема, миграции, доступ к данным
 internal/authn/          Argon2id, сессии, CSRF, задержка при переборе
@@ -79,8 +79,8 @@ packaging/               install.sh, update.sh, systemd-юнит
 | `metrics` | агрегаты по окнам хранения |
 | `events` | журнал событий: применение конфига, watchdog, входы в панель |
 
-На диске (не в базе): сертификаты и ключи в `/etc/hysteria2-manager/certs/` (0600), каталог данных
-`/var/lib/hysteria2-manager/`, лог-файл с ротацией — `/var/log/hysteria2-manager/`.
+На диске (не в базе): сертификаты и ключи в `/etc/hysteria-ward/certs/` (0600), каталог данных
+`/var/lib/hysteria-ward/`, лог-файл с ротацией — `/var/log/hysteria-ward/`.
 
 Пути — по FHS, а не как было в Entware-варианте: на VPS это стандартный Linux, и раскладывать данные по `/opt/etc`
 незачем.
@@ -89,6 +89,7 @@ packaging/               install.sh, update.sh, systemd-юнит
 
 | Пункт ТЗ | Принятое решение | Причина |
 |---|---|---|
+| 1.1 «Идентификатор системы `hysteria2-manager`» | **`hysteria-ward`** | идентификатор дословно означал «менеджер Hysteria 2», то есть намекал на роутерный продукт, вынесенный отсюда (ADR-0009); двух имён на один продукт быть не должно |
 | Целевые платформы Keenetic и OpenWrt | только Linux VPS | роутерная часть вынесена в отдельный репозиторий (ADR-0009) |
 | 2.3 «SQLite в режиме WAL» | bbolt | SQLite требует cgo либо не поддерживает целевые арх.; `mattn/go-sqlite3` ломает статическую сборку (ADR-0002) |
 | 2.1 «WebSocket в ядре» | SSE на участке демон↔UI, метрики — опросом | у ядра Hysteria нет push-канала: статистика отдаётся только по запросу |
