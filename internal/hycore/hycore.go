@@ -2,7 +2,7 @@
 //
 // Это единственное место в проекте, знающее про core/v2 и extras/v2: наружу
 // торчат только свои типы. Панель отдаёт ядру готовый сертификат и обработчики
-// авторизации и учёта трафика, поэтому сама знает про каждого клиента всё
+// авторизации и учёта трафика, поэтому знает про каждого пользователя всё
 // напрямую, без разбора логов и опроса состояния чужой службы.
 package hycore
 
@@ -32,7 +32,8 @@ type Config struct {
 	// Authenticator отвечает, кто стоит за строкой авторизации.
 	Authenticator Authenticator
 
-	// Traffic принимает сведения о трафике. Может быть nil, если учёт не нужен.
+	// Traffic принимает сведения о трафике. Обязателен: на нём стоит вся
+	// статистика пользователей и разрыв по исчерпанной квоте.
 	Traffic TrafficRecorder
 }
 
@@ -65,6 +66,9 @@ func Start(cfg Config) (*Server, error) {
 	if cfg.Authenticator == nil {
 		return nil, errors.New("не задан источник пользователей")
 	}
+	if cfg.Traffic == nil {
+		return nil, errors.New("не задан приёмник учёта трафика")
+	}
 
 	addr, err := net.ResolveUDPAddr("udp", cfg.ListenAddr)
 	if err != nil {
@@ -86,9 +90,7 @@ func Start(cfg Config) (*Server, error) {
 		TLSConfig:     tlsConfigOf(cfg.TLS),
 		Conn:          packetConn,
 		Authenticator: &authAdapter{next: cfg.Authenticator},
-	}
-	if cfg.Traffic != nil {
-		coreCfg.TrafficLogger = &trafficAdapter{next: cfg.Traffic}
+		TrafficLogger: &trafficAdapter{next: cfg.Traffic},
 	}
 
 	core, err := server.NewServer(coreCfg)

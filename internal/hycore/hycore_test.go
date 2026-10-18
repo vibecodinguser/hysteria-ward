@@ -115,7 +115,7 @@ func TestServerProxiesTCPToTarget(t *testing.T) {
 		Authenticator: fakeAuth{"secret": "alice"},
 	})
 
-	conn := dial(t, srv, insecureClient("secret"), echoAddr)
+	conn := dial(t, srv, trustingClient("secret"), echoAddr)
 
 	want := []byte("ping through hysteria")
 	if got := roundTrip(t, conn, want); !bytes.Equal(got, want) {
@@ -161,7 +161,7 @@ func TestServerReportsTrafficPerUser(t *testing.T) {
 		Traffic:       traffic,
 	})
 
-	conn := dial(t, srv, insecureClient("secret"), echoAddr)
+	conn := dial(t, srv, trustingClient("secret"), echoAddr)
 
 	payload := []byte("traffic must be counted")
 	roundTrip(t, conn, payload)
@@ -190,7 +190,7 @@ func TestServerObfuscatesWithSalamander(t *testing.T) {
 		ObfsPassword:  password,
 	})
 
-	cfg := insecureClient("secret")
+	cfg := trustingClient("secret")
 	cfg.ConnFactory = salamanderFactory{psk: []byte(password)}
 
 	conn := dial(t, srv, cfg, echoAddr)
@@ -255,11 +255,45 @@ func freeUDPPort(t *testing.T) int {
 func TestStartWithoutAuthenticatorFails(t *testing.T) {
 	srv, err := hycore.Start(hycore.Config{
 		ListenAddr: "127.0.0.1:0",
-		TLS:        testTLSConfig(t),
+		TLS:        testTLSConfig(),
 	})
 	if err == nil {
 		_ = srv.Stop()
 		t.Fatal("сервер поднялся без источника пользователей, ожидалась ошибка")
+	}
+}
+
+// TestStartWithoutTrafficRecorderFails — учёт трафика обязателен. Без него
+// панель не узнала бы ни о подключениях, ни о расходах: статистика была бы
+// пустой, а квоты не работали бы вовсе.
+func TestStartWithoutTrafficRecorderFails(t *testing.T) {
+	srv, err := hycore.Start(hycore.Config{
+		ListenAddr:    "127.0.0.1:0",
+		TLS:           testTLSConfig(),
+		Authenticator: fakeAuth{"secret": "alice"},
+	})
+	if err == nil {
+		_ = srv.Stop()
+		t.Fatal("сервер поднялся без учёта трафика, ожидалась ошибка")
+	}
+}
+
+// TestClientWithoutTrustedCertificateFails — контроль к предыдущему: без нашего
+// сертификата в корнях клиент не подключается. Если бы тесты отключали проверку
+// сертификата, этот сценарий прошёл бы и ничего не доказывал.
+func TestClientWithoutTrustedCertificateFails(t *testing.T) {
+	srv := startServer(t, hycore.Config{
+		Authenticator: fakeAuth{"secret": "alice"},
+	})
+
+	c, _, err := client.NewClient(&client.Config{
+		ServerAddr: srv.Addr(),
+		Auth:       "secret",
+		TLSConfig:  client.TLSConfig{ServerName: testServerName},
+	})
+	if err == nil {
+		_ = c.Close()
+		t.Fatal("клиент подключился, не доверяя сертификату сервера, ожидалась ошибка")
 	}
 }
 
@@ -272,7 +306,10 @@ func startServer(t *testing.T, cfg hycore.Config) *hycore.Server {
 		cfg.ListenAddr = "127.0.0.1:0"
 	}
 	if cfg.TLS == nil {
-		cfg.TLS = testTLSConfig(t)
+		cfg.TLS = testTLSConfig()
+	}
+	if cfg.Traffic == nil {
+		cfg.Traffic = newFakeTraffic()
 	}
 
 	srv, err := hycore.Start(cfg)
@@ -320,12 +357,69 @@ func roundTrip(t *testing.T, conn net.Conn, payload []byte) []byte {
 	return got
 }
 
-// insecureClient — клиент, который не проверяет сертификат: в тестах он
-// самоподписанный.
-func insecureClient(auth string) client.Config {
+// testServerName — имя в сертификате и в настройках клиента: по нему клиент
+// убеждается, что говорит именно с нашим сервером.
+const testServerName = "hysteria-ward.test"
+
+// testCert — самоподписанный сертификат, общий для всех тестов: серверу нужно
+// что предъявить, а клиенту — чем проверить. Проверку сертификата тесты не
+// отключают, иначе не заметили бы, что сервер подсунул собственный.
+var testCert = sync.OnceValue(func() testCertificate {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic("не сгенерировался ключ тестового сертификата: " + err.Error())
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: testServerName},
+		DNSNames:     []string{testServerName},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		panic("не собрался тестовый сертификат: " + err.Error())
+	}
+
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		panic("не разобрался тестовый сертификат: " + err.Error())
+	}
+
+	return testCertificate{
+		tls:  tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf},
+		leaf: leaf,
+	}
+})
+
+// testCertificate — тестовый сертификат и он же в роли корневого.
+type testCertificate struct {
+	tls  tls.Certificate
+	leaf *x509.Certificate
+}
+
+// testTLSConfig — настройки сервера с тестовым сертификатом.
+func testTLSConfig() *tls.Config {
+	return &tls.Config{Certificates: []tls.Certificate{testCert().tls}}
+}
+
+// trustingClient — клиент, который доверяет тестовому сертификату и потому
+// проверяет его всерьёз.
+func trustingClient(auth string) client.Config {
+	roots := x509.NewCertPool()
+	roots.AddCert(testCert().leaf)
+
 	return client.Config{
-		Auth:      auth,
-		TLSConfig: client.TLSConfig{InsecureSkipVerify: true},
+		Auth: auth,
+		TLSConfig: client.TLSConfig{
+			RootCAs:    roots,
+			ServerName: testServerName,
+		},
 	}
 }
 
@@ -367,34 +461,4 @@ func startEchoServer(t *testing.T) (addr string, closeFn func()) {
 	}()
 
 	return ln.Addr().String(), func() { _ = ln.Close() }
-}
-
-// testTLSConfig собирает самоподписанный сертификат прямо в памяти. Сертификат
-// нужен только тесту: сервер обязан брать его из настроек, а не выпускать сам.
-func testTLSConfig(t *testing.T) *tls.Config {
-	t.Helper()
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("ключ не сгенерировался: %v", err)
-	}
-
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "hysteria-ward-test"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
-	}
-
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("сертификат не собрался: %v", err)
-	}
-
-	return &tls.Config{
-		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
-	}
 }
