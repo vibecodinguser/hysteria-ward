@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -198,6 +199,54 @@ func TestServerObfuscatesWithSalamander(t *testing.T) {
 	if got := roundTrip(t, conn, want); !bytes.Equal(got, want) {
 		t.Errorf("через прокси вернулось %q, ожидалось %q", got, want)
 	}
+}
+
+// TestStartWithoutCertificateFails — сервер не выпускает сертификат сам: если
+// сертификат не настроен, он не поднимается. Иначе панель молча жила бы с
+// самодельным сертификатом, которому клиенты не поверят.
+func TestStartWithoutCertificateFails(t *testing.T) {
+	srv, err := hycore.Start(hycore.Config{
+		ListenAddr:    "127.0.0.1:0",
+		Authenticator: fakeAuth{"secret": "alice"},
+	})
+	if err == nil {
+		_ = srv.Stop()
+		t.Fatal("сервер поднялся без сертификата, ожидалась ошибка")
+	}
+}
+
+// TestServerListensOnGivenPort — сервер слушает именно тот порт, который задан
+// в настройках. Порт 0 в остальных тестах этого не проверяет: он одинаково
+// подошёл бы и серверу, который настройку игнорирует.
+func TestServerListensOnGivenPort(t *testing.T) {
+	port := freeUDPPort(t)
+
+	srv := startServer(t, hycore.Config{
+		ListenAddr:    fmt.Sprintf("127.0.0.1:%d", port),
+		Authenticator: fakeAuth{"secret": "alice"},
+	})
+
+	addr, ok := srv.Addr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("Addr() = %T, ожидался *net.UDPAddr", srv.Addr())
+	}
+	if addr.Port != port {
+		t.Errorf("сервер слушает порт %d, ожидался %d", addr.Port, port)
+	}
+}
+
+// freeUDPPort находит свободный UDP-порт. Между освобождением и запуском сервера
+// порт теоретически может занять кто-то ещё, но в тестовой среде это редкость.
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("не нашёлся свободный порт: %v", err)
+	}
+	defer conn.Close()
+
+	return conn.LocalAddr().(*net.UDPAddr).Port
 }
 
 // startServer поднимает сервер и убирает его за собой. Тесты задают только то,
