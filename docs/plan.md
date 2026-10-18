@@ -49,6 +49,8 @@
 
 ```
 cmd/hysteria-ward/       точка входа, парсинг флагов, подъём подсистем
+internal/build/          метаданные сборки: версия, коммит, платформа
+internal/cli/            разбор аргументов и диспетчер команд
 internal/hycore/         обёртка над ядром Hysteria 2 (in-process), хуки Authenticator/TrafficLogger
 internal/store/          bbolt: схема, миграции, доступ к данным
 internal/authn/          Argon2id, сессии, CSRF, задержка при переборе

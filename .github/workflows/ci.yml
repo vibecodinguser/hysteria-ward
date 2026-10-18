@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Тесты (Go ${{ matrix.go-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.26 — нижняя граница: её требует ядро Hysteria 2.
+        # stable — проверка, что код не ломается на свежем Go.
+        go-version: ["1.26", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Сборка
+        run: go build ./...
+
+      - name: Тесты
+        run: go test ./...
+
+  lint:
+    name: Линтер
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Установить golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Линтер
+        run: golangci-lint run ./...
+
+  build:
+    name: Сборка linux/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Обе гарантированные платформы. Запускается только amd64: раннера
+        # под arm64 нет, поэтому бинарь arm64 проверяется сборкой.
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Собрать
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: make build VERSION=v0.0.0-test COMMIT=deadbee
+
+      - name: Проверить, что бинарь статический
+        if: matrix.goarch == 'amd64'
+        run: |
+          file bin/hysteria-ward
+          file bin/hysteria-ward | grep -q "statically linked"
+
+      - name: Проверить запечённые метаданные
+        if: matrix.goarch == 'amd64'
+        run: |
+          got="$(./bin/hysteria-ward --version)"
+          want="hysteria-ward v0.0.0-test (deadbee) linux/amd64"
+          if [ "$got" != "$want" ]; then
+            echo "получено:  $got"
+            echo "ожидалось: $want"
+            exit 1
+          fi
+          echo "ок: $got"
