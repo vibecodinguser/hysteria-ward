@@ -12,6 +12,7 @@ import (
 	"net"
 
 	"github.com/apernet/hysteria/core/v2/server"
+	"github.com/apernet/hysteria/extras/v2/obfs"
 )
 
 // Config — всё, что нужно, чтобы поднять сервер.
@@ -70,9 +71,15 @@ func Start(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("сокет %q: %w", cfg.ListenAddr, err)
 	}
 
+	packetConn, err := obfuscate(conn, cfg.ObfsPassword)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+
 	coreCfg := &server.Config{
 		TLSConfig:     tlsConfigOf(cfg.TLS),
-		Conn:          conn,
+		Conn:          packetConn,
 		Authenticator: &authAdapter{next: cfg.Authenticator},
 	}
 	if cfg.Traffic != nil {
@@ -85,7 +92,7 @@ func Start(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("ядро не поднялось: %w", err)
 	}
 
-	s := &Server{core: core, conn: conn}
+	s := &Server{core: core, conn: packetConn}
 	go func() { _ = s.core.Serve() }()
 
 	return s, nil
@@ -99,6 +106,21 @@ func (s *Server) Addr() net.Addr {
 // Stop останавливает ядро и разрывает активные соединения.
 func (s *Server) Stop() error {
 	return s.core.Close()
+}
+
+// obfuscate накрывает сокет обфускацией salamander. Пустой пароль означает, что
+// обфускация выключена и сокет остаётся как есть.
+func obfuscate(conn net.PacketConn, password string) (net.PacketConn, error) {
+	if password == "" {
+		return conn, nil
+	}
+
+	wrapped, err := obfs.WrapPacketConnSalamander(conn, []byte(password))
+	if err != nil {
+		return nil, fmt.Errorf("обфускация: %w", err)
+	}
+
+	return wrapped, nil
 }
 
 // tlsConfigOf переносит сертификат из настроек панели в словарь ядра.

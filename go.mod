@@ -2,7 +2,10 @@ module github.com/vibecodinguser/hysteria-ward
 
 go 1.26.0
 
-require github.com/apernet/hysteria/core/v2 v2.13.0
+require (
+	github.com/apernet/hysteria/core/v2 v2.13.0
+	github.com/apernet/hysteria/extras/v2 v2.13.0
+)
 
 require (
 	github.com/andybalholm/brotli v1.1.0 // indirect

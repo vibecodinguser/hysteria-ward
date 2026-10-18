@@ -18,6 +18,7 @@ import (
 
 	"github.com/apernet/hysteria/core/v2/client"
 	coreErrs "github.com/apernet/hysteria/core/v2/errors"
+	"github.com/apernet/hysteria/extras/v2/obfs"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/hycore"
 )
@@ -86,6 +87,21 @@ func (f *fakeTraffic) snapshot(userID string) trafficTotals {
 	return trafficTotals{}
 }
 
+// salamanderFactory даёт клиенту сокет с той же обфускацией, что и настоящий
+// клиент Hysteria 2: без этого сервер, оборачивающий пакеты, клиента не поймёт.
+type salamanderFactory struct {
+	psk []byte
+}
+
+func (f salamanderFactory) New(net.Addr) (net.PacketConn, error) {
+	conn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return obfs.WrapPacketConnSalamander(conn, f.psk)
+}
+
 // TestServerProxiesTCPToTarget — сквозной сценарий задачи: клиент с верным
 // паролем подключается к серверу и получает через него ответ от цели.
 // Клиент здесь берётся из ядра и живёт только в тесте: продукт клиентом не
@@ -101,15 +117,7 @@ func TestServerProxiesTCPToTarget(t *testing.T) {
 	conn := dial(t, srv, insecureClient("secret"), echoAddr)
 
 	want := []byte("ping through hysteria")
-	if _, err := conn.Write(want); err != nil {
-		t.Fatalf("запись через прокси: %v", err)
-	}
-
-	got := make([]byte, len(want))
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatalf("чтение через прокси: %v", err)
-	}
-	if !bytes.Equal(got, want) {
+	if got := roundTrip(t, conn, want); !bytes.Equal(got, want) {
 		t.Errorf("через прокси вернулось %q, ожидалось %q", got, want)
 	}
 }
@@ -155,12 +163,7 @@ func TestServerReportsTrafficPerUser(t *testing.T) {
 	conn := dial(t, srv, insecureClient("secret"), echoAddr)
 
 	payload := []byte("traffic must be counted")
-	if _, err := conn.Write(payload); err != nil {
-		t.Fatalf("запись через прокси: %v", err)
-	}
-	if _, err := io.ReadFull(conn, make([]byte, len(payload))); err != nil {
-		t.Fatalf("чтение через прокси: %v", err)
-	}
+	roundTrip(t, conn, payload)
 
 	// Учёт приходит асинхронно: байты проходят через ядро уже после того, как
 	// их увидел тест.
@@ -171,6 +174,30 @@ func TestServerReportsTrafficPerUser(t *testing.T) {
 		got := traffic.snapshot("alice")
 		return got.tx+got.rx >= uint64(len(payload))
 	})
+}
+
+// TestServerObfuscatesWithSalamander — сервер с включённой обфускацией работает
+// с клиентом, который оборачивает пакеты тем же паролем. Обёрнут именно клиент,
+// поэтому успех доказывает, что сервер пакеты и правда деобфусцирует.
+func TestServerObfuscatesWithSalamander(t *testing.T) {
+	echoAddr, closeEcho := startEchoServer(t)
+	defer closeEcho()
+
+	const password = "obfs-password"
+	srv := startServer(t, hycore.Config{
+		Authenticator: fakeAuth{"secret": "alice"},
+		ObfsPassword:  password,
+	})
+
+	cfg := insecureClient("secret")
+	cfg.ConnFactory = salamanderFactory{psk: []byte(password)}
+
+	conn := dial(t, srv, cfg, echoAddr)
+
+	want := []byte("hidden from DPI")
+	if got := roundTrip(t, conn, want); !bytes.Equal(got, want) {
+		t.Errorf("через прокси вернулось %q, ожидалось %q", got, want)
+	}
 }
 
 // startServer поднимает сервер и убирает его за собой. Тесты задают только то,
@@ -212,6 +239,22 @@ func dial(t *testing.T, srv *hycore.Server, cfg client.Config, target string) ne
 	t.Cleanup(func() { _ = conn.Close() })
 
 	return conn
+}
+
+// roundTrip отправляет байты через соединение и возвращает ответ цели.
+func roundTrip(t *testing.T, conn net.Conn, payload []byte) []byte {
+	t.Helper()
+
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("запись через прокси: %v", err)
+	}
+
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("чтение через прокси: %v", err)
+	}
+
+	return got
 }
 
 // insecureClient — клиент, который не проверяет сертификат: в тестах он
