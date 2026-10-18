@@ -221,7 +221,7 @@ Sym (random)	✅	✅	❌	❌	❌
 # Универсальный командный скрипт установки hysteria2-manager
 set -e
 
-REPO_URL="https://github.com/<owner>/Hys-Man/releases/latest/download/install.sh"
+REPO_URL="https://github.com/<owner>/hysteria-ward/releases/latest/download/install.sh"
 
 if command -v curl >/dev/null 2>&1; then
     echo "[INFO] Использование curl для загрузки дистрибутива..."
