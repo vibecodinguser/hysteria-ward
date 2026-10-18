@@ -1,0 +1,6 @@
+# actionlint не знает произвольных меток self-hosted раннеров, пока их не
+# перечислить явно. Метка hysteria-ward-ci задаётся при регистрации раннера
+# в лаборатории и используется в runs-on.
+self-hosted-runner:
+  labels:
+    - hysteria-ward-ci
