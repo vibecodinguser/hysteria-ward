@@ -70,11 +70,16 @@ func Start(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("сокет %q: %w", cfg.ListenAddr, err)
 	}
 
-	core, err := server.NewServer(&server.Config{
+	coreCfg := &server.Config{
 		TLSConfig:     tlsConfigOf(cfg.TLS),
 		Conn:          conn,
 		Authenticator: &authAdapter{next: cfg.Authenticator},
-	})
+	}
+	if cfg.Traffic != nil {
+		coreCfg.TrafficLogger = &trafficAdapter{next: cfg.Traffic}
+	}
+
+	core, err := server.NewServer(coreCfg)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("ядро не поднялось: %w", err)
@@ -116,3 +121,21 @@ func (a *authAdapter) Authenticate(_ net.Addr, auth string, _ uint64) (bool, str
 	id, ok := a.next.Auth(auth)
 	return ok, id
 }
+
+// trafficAdapter приводит наш приёмник к тому, что просит ядро. Слежение за
+// отдельными потоками панели пока не нужно: объёмы приходят через LogTraffic.
+type trafficAdapter struct {
+	next TrafficRecorder
+}
+
+func (a *trafficAdapter) LogTraffic(id string, tx, rx uint64) bool {
+	return a.next.Traffic(id, tx, rx)
+}
+
+func (a *trafficAdapter) LogOnlineState(id string, online bool) {
+	a.next.Online(id, online)
+}
+
+func (a *trafficAdapter) TraceStream(_ server.HyStream, _ *server.StreamStats) {}
+
+func (a *trafficAdapter) UntraceStream(_ server.HyStream) {}
