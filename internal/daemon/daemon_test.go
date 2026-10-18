@@ -3,7 +3,6 @@ package daemon_test
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vibecodinguser/hysteria-ward/internal/authn"
 	"github.com/vibecodinguser/hysteria-ward/internal/config"
 	"github.com/vibecodinguser/hysteria-ward/internal/daemon"
 	"github.com/vibecodinguser/hysteria-ward/internal/logging"
@@ -162,11 +162,18 @@ type fakePanel struct {
 	runErr   error
 }
 
-func (f *fakePanel) start(cfg config.Config, logger *slog.Logger) (daemon.Panel, error) {
-	// Журнал обязан дойти до интерфейса: серверу есть что сказать о запуске и
-	// своих ошибках.
-	if logger == nil {
+func (f *fakePanel) start(opts daemon.PanelOptions) (daemon.Panel, error) {
+	// Журнал, авторизация и состояние ядра обязаны дойти до интерфейса: серверу
+	// есть что сказать о запуске и своих ошибках, пускать он должен по чему-то, а
+	// показывать администратору — что с ядром.
+	if opts.Logger == nil {
 		return nil, errors.New("журнал не передан")
+	}
+	if opts.Auth == nil {
+		return nil, errors.New("авторизация не передана")
+	}
+	if opts.CoreRunning == nil {
+		return nil, errors.New("состояние ядра не передано")
 	}
 
 	f.mu.Lock()
@@ -176,7 +183,7 @@ func (f *fakePanel) start(cfg config.Config, logger *slog.Logger) (daemon.Panel,
 		return nil, f.startErr
 	}
 
-	f.configs = append(f.configs, cfg)
+	f.configs = append(f.configs, opts.Config)
 
 	return &fakePanelRun{err: f.runErr}, nil
 }
@@ -621,6 +628,40 @@ func TestApplyKeepsCoreWhenPreflightFails(t *testing.T) {
 	if !p.daemon.CoreRunning() {
 		t.Error("работающее ядро остановлено из-за нечитаемого сертификата")
 	}
+
+	p.stop(t)
+}
+
+// TestSeedsDefaultCredential — панель заводит себе учётные данные по умолчанию и
+// предупреждает о них в журнале.
+//
+// Панель должна открываться сразу после установки: если бы пароля не было вовсе,
+// администратору негде было бы войти, а настраивать его из командной строки
+// вслепую — хуже, чем войти и сменить пароль в интерфейсе.
+func TestSeedsDefaultCredential(t *testing.T) {
+	p := newPanel(t, runnable())
+	p.start()
+
+	name, hash, ok, err := p.daemon.Auth().Credential()
+	if err != nil {
+		t.Fatalf("Credential() = %v", err)
+	}
+	if !ok {
+		t.Fatal("учётные данные по умолчанию не заведены")
+	}
+	if name != authn.DefaultName {
+		t.Errorf("имя = %q, ожидалось %q", name, authn.DefaultName)
+	}
+
+	matched, err := authn.Verify(hash, authn.DefaultPassword)
+	if err != nil {
+		t.Fatalf("Verify() = %v", err)
+	}
+	if !matched {
+		t.Error("записанный пароль не совпал с паролем по умолчанию")
+	}
+
+	p.waitForLog(t, "пароль по умолчанию")
 
 	p.stop(t)
 }

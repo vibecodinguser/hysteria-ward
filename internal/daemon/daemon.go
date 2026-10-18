@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vibecodinguser/hysteria-ward/internal/authn"
 	"github.com/vibecodinguser/hysteria-ward/internal/config"
 	"github.com/vibecodinguser/hysteria-ward/internal/logging"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
@@ -48,14 +49,32 @@ type Options struct {
 	// подставляет ядро, которым можно управлять.
 	StartCore func(config.Config) (Core, error)
 
-	// StartPanel поднимает HTTPS-сервер интерфейса по конфигурации. Журнал
-	// передаётся сюда же: серверу есть что сказать о запуске и своих ошибках.
-	StartPanel func(config.Config, *slog.Logger) (Panel, error)
+	// StartPanel поднимает HTTPS-сервер интерфейса. Всё, что ему нужно, приходит
+	// в PanelOptions: у панели один набор зависимостей, и растёт он здесь, а не в
+	// списке аргументов.
+	StartPanel func(PanelOptions) (Panel, error)
 
 	// Preflight проверяет то, что видно только перед самым запуском — например,
 	// читается ли сертификат. Вызывается до остановки работающего ядра, чтобы
 	// такая ошибка не унесла с собой живой сервер. Необязателен.
 	Preflight func(config.Config) error
+}
+
+// PanelOptions — что нужно интерфейсу панели: конфигурация, журнал, авторизация и
+// состояние ядра.
+type PanelOptions struct {
+	// Config — конфигурация панели.
+	Config config.Config
+
+	// Logger — журнал панели.
+	Logger *slog.Logger
+
+	// Auth — вход в панель.
+	Auth *authn.Service
+
+	// CoreRunning сообщает, работает ли ядро: интерфейс показывает это
+	// администратору.
+	CoreRunning func() bool
 }
 
 // Daemon — работающая панель: база, журнал и ядро под общим управлением.
@@ -64,6 +83,7 @@ type Daemon struct {
 	db     *store.Store
 	log    *logging.Log
 	logger *slog.Logger
+	auth   *authn.Service
 
 	// mu охраняет core. Жизненный цикл ядра целиком идёт под ним, поэтому два
 	// одновременных «Применить» не подерутся за порт.
@@ -102,13 +122,54 @@ func New(opts Options) (*Daemon, error) {
 		return nil, err
 	}
 
-	return &Daemon{
+	auth, err := authn.New(db, log.Logger())
+	if err != nil {
+		_ = db.Close()
+		_ = log.Close()
+		return nil, err
+	}
+
+	d := &Daemon{
 		opts:     opts,
 		db:       db,
 		log:      log,
 		logger:   log.Logger(),
+		auth:     auth,
 		failures: make(chan failure, 1),
-	}, nil
+	}
+
+	if err := d.ensureCredential(); err != nil {
+		_ = d.Close()
+		return nil, err
+	}
+
+	return d, nil
+}
+
+// ensureCredential заводит учётные данные по умолчанию, если их ещё нет, и
+// предупреждает, пока действует пароль по умолчанию.
+//
+// Панель должна открываться сразу после установки, а не требовать настройки
+// вслепую из командной строки. Плата за это — предупреждение в журнале и то, что
+// наружу панель не выставлена: по умолчанию она слушает петлю.
+func (d *Daemon) ensureCredential() error {
+	inUse, err := d.auth.EnsureCredential()
+	if err != nil {
+		return err
+	}
+
+	if inUse {
+		d.logger.Warn("действует пароль по умолчанию: смените его командой hysteria-ward passwd",
+			"name", authn.DefaultName)
+	}
+
+	return nil
+}
+
+// Auth отдаёт авторизацию: она нужна тому, кто собирает интерфейс панели, а
+// заводится здесь, потому что здесь же лежит база.
+func (d *Daemon) Auth() *authn.Service {
+	return d.auth
 }
 
 // Store отдаёт базу: настройки, пользователи и статистика нужны интерфейсу
@@ -225,7 +286,12 @@ func (d *Daemon) openPanel(ctx context.Context) (<-chan error, error) {
 		return nil, err
 	}
 
-	panel, err := d.opts.StartPanel(cfg, d.logger)
+	panel, err := d.opts.StartPanel(PanelOptions{
+		Config:      cfg,
+		Logger:      d.logger,
+		Auth:        d.auth,
+		CoreRunning: d.CoreRunning,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("интерфейс не поднялся: %w", err)
 	}

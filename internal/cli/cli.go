@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/api"
@@ -27,6 +26,7 @@ var usage = fmt.Sprintf(`%[1]s — панель управления серве�
 
 Использование:
   %[1]s serve [флаги]
+  %[1]s passwd [флаги]
   %[1]s [флаг]
 
 Флаги:
@@ -34,21 +34,37 @@ var usage = fmt.Sprintf(`%[1]s — панель управления серве�
   --help     показать эту справку
 
 Флаги serve:
-  --db     файл базы (по умолчанию /var/lib/hysteria-ward/hysteria-ward.db)
-  --log    файл журнала (по умолчанию /var/log/hysteria-ward/hysteria-ward.log)
+  --db     файл базы (по умолчанию %[2]s)
+  --log    файл журнала (по умолчанию %[3]s)
   --debug  отладочный запуск: если сертификата ещё нет, выписать самоподписанный
+
+Флаги passwd:
+  --db     файл базы (по умолчанию %[2]s)
+  --name   имя администратора (по умолчанию текущее)
+
+Пароль панель спрашивает у того, кто её ставит: с терминала — дважды и не показывая
+набранное, из трубы — одной строкой. Панель перед сменой пароля нужно остановить:
+пока она работает, база занята.
 
 Сам сервер настраивается в базе: адрес ядра, адрес панели, сертификат, обфускация
 и masquerade хранятся там и меняются из интерфейса панели.
-`, build.Name)
+`, build.Name, defaultDBPath, defaultLogPath)
+
+// Где панель хранит базу и журнал по умолчанию. Пути в духе FHS: настройки и
+// состояние — отдельно от программы, чтобы обновление не задевало данные.
+const (
+	defaultDBPath  = "/var/lib/hysteria-ward/hysteria-ward.db"
+	defaultLogPath = "/var/log/hysteria-ward/hysteria-ward.log"
+)
 
 // Run выполняет команду и возвращает код возврата.
 //
 // Run намеренно не вызывает os.Exit и не пишет в глобальные потоки: это
 // позволяет проверять поведение бинаря внутри процесса, без порождения
 // дочерних процессов. Контекст приходит снаружи: в бою его отменяют SIGINT и
-// SIGTERM, в тесте — явный вызов cancel.
-func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+// SIGTERM, в тесте — явный вызов cancel. Потоки ввода-вывода тоже приходят
+// снаружи: команда, спрашивающая пароль, иначе читала бы терминал мимо теста.
+func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return 1
@@ -57,6 +73,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "serve":
 		return runServe(ctx, args[1:], stderr)
+
+	case "passwd":
+		return runPasswd(args[1:], stdin, stdout, stderr)
 
 	case "--version":
 		fmt.Fprintln(stdout, build.Current().String())
@@ -78,8 +97,8 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
-	dbPath := fs.String("db", "/var/lib/hysteria-ward/hysteria-ward.db", "файл базы")
-	logPath := fs.String("log", "/var/log/hysteria-ward/hysteria-ward.log", "файл журнала")
+	dbPath := fs.String("db", defaultDBPath, "файл базы")
+	logPath := fs.String("log", defaultLogPath, "файл журнала")
 	debug := fs.Bool("debug", false, "отладочный запуск: самоподписанный сертификат, пока нет настоящего")
 
 	if err := fs.Parse(args); err != nil {
@@ -91,8 +110,8 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 		Log:       logging.Options{Path: *logPath},
 		StartCore: startCore,
 		Preflight: checkCoreConfig,
-		StartPanel: func(cfg config.Config, logger *slog.Logger) (daemon.Panel, error) {
-			return startPanel(cfg, logger, *debug)
+		StartPanel: func(opts daemon.PanelOptions) (daemon.Panel, error) {
+			return startPanel(opts, *debug)
 		},
 	})
 	if err != nil {
@@ -114,26 +133,28 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 // Сертификат берётся из настроек — тот же, что и у ядра. В отладочном запуске,
 // если настоящего сертификата ещё нет, выписывается самоподписанный: браузер его
 // не признает, но посмотреть панель до появления домена можно.
-func startPanel(cfg config.Config, logger *slog.Logger, debug bool) (daemon.Panel, error) {
-	certificate, err := loadCertificate(cfg)
+func startPanel(opts daemon.PanelOptions, debug bool) (daemon.Panel, error) {
+	certificate, err := loadCertificate(opts.Config)
 	if err != nil {
 		if !debug {
 			return nil, err
 		}
 
-		logger.Warn("настоящий сертификат не читается, беру самоподписанный", "err", err)
+		opts.Logger.Warn("настоящий сертификат не читается, беру самоподписанный", "err", err)
 
-		certificate, err = certs.SelfSigned(panelHosts(cfg.Panel.Listen)...)
+		certificate, err = certs.SelfSigned(panelHosts(opts.Config.Panel.Listen)...)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	return api.New(api.Options{
-		Listen:      cfg.Panel.Listen,
+		Listen:      opts.Config.Panel.Listen,
 		Certificate: certificate,
 		Handler:     ui.Handler(),
-		Logger:      logger,
+		Auth:        opts.Auth,
+		CoreRunning: opts.CoreRunning,
+		Logger:      opts.Logger,
 	})
 }
 

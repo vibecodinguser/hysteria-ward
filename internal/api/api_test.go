@@ -8,11 +8,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/api"
+	"github.com/vibecodinguser/hysteria-ward/internal/authn"
 	"github.com/vibecodinguser/hysteria-ward/internal/certs"
+	"github.com/vibecodinguser/hysteria-ward/internal/store"
 )
 
 // response — что отдаёт обработчик в тесте.
@@ -33,8 +36,41 @@ func options(t *testing.T) api.Options {
 		Listen:      "127.0.0.1:0",
 		Certificate: certificate,
 		Handler:     http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, response) }),
+		Auth:        authService(t),
 		Logger:      slog.New(slog.DiscardHandler),
 	}
+}
+
+// authService собирает настоящую авторизацию поверх настоящей базы во временном
+// каталоге.
+//
+// Подделка здесь была бы хуже: вход в панель и есть то, что проверяют тесты
+// сервера, — а проверять, что подделка согласна сама с собой, незачем.
+func authService(t *testing.T) *authn.Service {
+	t.Helper()
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "hysteria-ward.db"))
+	if err != nil {
+		t.Fatalf("store.Open() = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("Close() = %v", err)
+		}
+	})
+
+	service, err := authn.New(db, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("authn.New() = %v", err)
+	}
+
+	// Пароль по умолчанию: тесты входят им, как это сделает администратор после
+	// установки.
+	if _, err := service.EnsureCredential(); err != nil {
+		t.Fatalf("EnsureCredential() = %v", err)
+	}
+
+	return service
 }
 
 // server поднимает HTTPS-сервер панели на свободном адресе.

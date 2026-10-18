@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/vibecodinguser/hysteria-ward/internal/authn"
 )
 
 const (
@@ -37,8 +39,16 @@ type Options struct {
 	// Certificate — сертификат для HTTPS.
 	Certificate tls.Certificate
 
-	// Handler — что отдавать.
+	// Handler — что отдавать после входа: интерфейс панели.
 	Handler http.Handler
+
+	// Auth — вход в панель. Обязателен: панель, в которую пускают без пароля, —
+	// это не панель.
+	Auth *authn.Service
+
+	// CoreRunning сообщает, работает ли ядро. Необязателен: без него панель
+	// честно отвечает, что ядро не работает.
+	CoreRunning func() bool
 
 	// Logger — куда писать о запуске, остановке и ошибках сервера.
 	Logger *slog.Logger
@@ -49,6 +59,11 @@ type Server struct {
 	listener net.Listener
 	http     *http.Server
 	logger   *slog.Logger
+
+	// auth и coreRunning — то, чем панель отвечает на запросы: вход и состояние
+	// ядра.
+	auth        *authn.Service
+	coreRunning func() bool
 
 	// mu защищает silent — соединения, которые подключились, но ещё ничего не
 	// сказали, — и stopping: остановку панели.
@@ -73,6 +88,9 @@ func New(opts Options) (*Server, error) {
 	if opts.Listen == "" {
 		return nil, errors.New("не задан адрес панели")
 	}
+	if opts.Auth == nil {
+		return nil, errors.New("не задана авторизация")
+	}
 	if len(opts.Certificate.Certificate) == 0 {
 		// Без сертификата сервер поднялся бы, но не смог бы ответить ни одному
 		// клиенту: рукопожатие падает уже после того, как панель объявила себя
@@ -86,12 +104,14 @@ func New(opts Options) (*Server, error) {
 	}
 
 	server := &Server{
-		listener: listener,
-		logger:   opts.Logger,
-		silent:   make(map[net.Conn]struct{}),
+		listener:    listener,
+		logger:      opts.Logger,
+		auth:        opts.Auth,
+		coreRunning: opts.CoreRunning,
+		silent:      make(map[net.Conn]struct{}),
 	}
 	server.http = &http.Server{
-		Handler:           opts.Handler,
+		Handler:           server.routes(opts.Handler),
 		ConnState:         server.trackConn,
 		ErrorLog:          slog.NewLogLogger(opts.Logger.Handler(), slog.LevelError),
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -105,6 +125,31 @@ func New(opts Options) (*Server, error) {
 	opts.Logger.Info("интерфейс открыт", "addr", listener.Addr().String())
 
 	return server, nil
+}
+
+// routes собирает поверхность панели: вход и то, что доступно вошедшему, — по
+// своим путям под /api/, всё остальное — интерфейс.
+//
+// Интерфейс отдаётся и без входа: иначе браузер не показал бы и формы входа. Ни
+// данных, ни состояния панели он не содержит — они за /api/, куда без входа не
+// пускают.
+func (s *Server) routes(panel http.Handler) http.Handler {
+	mux := http.NewServeMux()
+
+	// Вход не защищён сессией: её ещё нет, её и заводят.
+	mux.HandleFunc("POST /api/login", s.handleLogin)
+
+	mux.HandleFunc("POST /api/logout", s.protect(s.handleLogout))
+	mux.HandleFunc("GET /api/session", s.protect(s.handleSession))
+	mux.HandleFunc("GET /api/status", s.protect(s.handleStatus))
+
+	// Незнакомый путь внутри /api/ — ошибка, а не страница интерфейса.
+	mux.HandleFunc("/api/", s.handleUnknownAPI)
+
+	// Всё остальное — интерфейс; он сам разбирает свой маршрут на клиенте.
+	mux.Handle("/", panel)
+
+	return mux
 }
 
 // Addr — адрес, который слушает панель.
