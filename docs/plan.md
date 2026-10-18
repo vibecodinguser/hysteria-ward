@@ -53,6 +53,8 @@ internal/build/          метаданные сборки: версия, ком
 internal/cli/            разбор аргументов и диспетчер команд
 internal/hycore/         обёртка над ядром Hysteria 2 (in-process), хуки Authenticator/TrafficLogger
 internal/store/          bbolt: схема, миграции, доступ к данным
+internal/logging/        журнал: кольцевой буфер в памяти + файл с ротацией
+internal/daemon/         жизненный цикл: база, журнал, ядро, сигналы остановки
 internal/authn/          Argon2id, сессии, CSRF, задержка при переборе
 internal/certs/          ACME, self-signed, pinSHA256
 internal/metrics/        агрегация и история (1ч/5с, 3ч/15с, 24ч/1м, 7д/5м)
