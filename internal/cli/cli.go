@@ -79,11 +79,10 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 
 	panel, err := daemon.New(daemon.Options{
-		DBPath: *dbPath,
-		Log:    logging.Options{Path: *logPath},
-		StartCore: func(cfg config.Config) (daemon.Core, error) {
-			return startCore(cfg)
-		},
+		DBPath:    *dbPath,
+		Log:       logging.Options{Path: *logPath},
+		StartCore: startCore,
+		Preflight: checkCoreConfig,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
@@ -99,12 +98,22 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 	return 0
 }
 
-// startCore собирает ядро Hysteria 2 по конфигурации из базы. Сертификат читается
-// при каждом запуске: «Применить» должно подхватывать и его тоже.
+// checkCoreConfig проверяет то, что выясняется только перед запуском: читается ли
+// сертификат. Панель спрашивает это до остановки работающего ядра, чтобы опечатка
+// в пути не унесла с собой живой сервер.
+func checkCoreConfig(cfg config.Config) error {
+	if _, err := loadCertificate(cfg); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// startCore собирает ядро Hysteria 2 по конфигурации из базы.
 func startCore(cfg config.Config) (daemon.Core, error) {
-	certificate, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
+	certificate, err := loadCertificate(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("сертификат: %w", err)
+		return nil, err
 	}
 
 	return hycore.Start(hycore.Config{
@@ -114,6 +123,17 @@ func startCore(cfg config.Config) (daemon.Core, error) {
 		Authenticator: noUsers{},
 		Traffic:       noTraffic{},
 	})
+}
+
+// loadCertificate читает сертификат панели. Читается при каждом запуске: «Применить»
+// должно подхватывать и новый сертификат.
+func loadCertificate(cfg config.Config) (tls.Certificate, error) {
+	certificate, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("сертификат: %w", err)
+	}
+
+	return certificate, nil
 }
 
 // noUsers отвергает любой ключ: пользователей ещё нет, они появятся вместе с

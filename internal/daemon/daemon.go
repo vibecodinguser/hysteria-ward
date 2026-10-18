@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -40,22 +41,35 @@ type Options struct {
 	// зависимостью: панель не знает про Hysteria 2 ничего лишнего, а тест
 	// подставляет ядро, которым можно управлять.
 	StartCore func(config.Config) (Core, error)
+
+	// Preflight проверяет то, что видно только перед самым запуском — например,
+	// читается ли сертификат. Вызывается до остановки работающего ядра, чтобы
+	// такая ошибка не унесла с собой живой сервер. Необязателен.
+	Preflight func(config.Config) error
 }
 
 // Daemon — работающая панель: база, журнал и ядро под общим управлением.
 type Daemon struct {
-	opts Options
-	db   *store.Store
-	log  *logging.Log
+	opts   Options
+	db     *store.Store
+	log    *logging.Log
+	logger *slog.Logger
 
 	// mu охраняет core. Жизненный цикл ядра целиком идёт под ним, поэтому два
 	// одновременных «Применить» не подерутся за порт.
 	mu   sync.Mutex
 	core Core
 
-	// crashed принимает падения ядра. Буфер на один: если панель ещё не разобрала
+	// failures принимает падения ядра. Буфер на один: если панель ещё не разобрала
 	// прошлое падение, новое всё равно ничего не меняет.
-	crashed chan error
+	failures chan failure
+}
+
+// failure — падение ядра: какое именно ядро и почему. Ядро запоминается, чтобы
+// запоздавшее падение прежнего ядра не сбило панель после успешного «Применить».
+type failure struct {
+	core Core
+	err  error
 }
 
 // New открывает базу и журнал. Панель ещё не работает: за работу отвечает Run.
@@ -76,10 +90,11 @@ func New(opts Options) (*Daemon, error) {
 	}
 
 	return &Daemon{
-		opts:    opts,
-		db:      db,
-		log:     log,
-		crashed: make(chan error, 1),
+		opts:     opts,
+		db:       db,
+		log:      log,
+		logger:   log.Logger(),
+		failures: make(chan failure, 1),
 	}, nil
 }
 
@@ -111,12 +126,10 @@ func (d *Daemon) Close() error {
 // Run применяет конфигурацию и работает до отмены контекста (в бою — SIGINT или
 // SIGTERM). Штатное завершение возвращает nil.
 //
-// Если ядро не поднялось, Run продолжает работать: причина уходит в журнал, а
-// панель остаётся доступной, чтобы конфигурацию можно было починить.
+// Неудачное применение Run не прерывает: причина уходит в журнал, а панель
+// остаётся доступной, чтобы конфигурацию можно было починить.
 func (d *Daemon) Run(ctx context.Context) error {
-	if err := d.Apply(); err != nil {
-		d.log.Logger().Error("ядро не запустилось", "err", err)
-	}
+	_ = d.Apply()
 
 	for {
 		select {
@@ -128,14 +141,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 				return err
 			}
 
-			d.log.Logger().Info("панель остановлена")
+			d.logger.Info("панель остановлена")
 			return nil
 
-		case err := <-d.crashed:
-			d.log.Logger().Error("ядро упало", "err", err)
+		case f := <-d.failures:
+			d.logger.Error("ядро упало", "err", f.err)
 
 			d.mu.Lock()
-			d.core = nil
+			if d.core == f.core {
+				d.core = nil
+			}
 			d.mu.Unlock()
 		}
 	}
@@ -144,15 +159,32 @@ func (d *Daemon) Run(ctx context.Context) error {
 // Apply перечитывает конфигурацию из базы и перезапускает ядро. Активные
 // соединения при этом обрываются — об этом администратора предупреждает интерфейс.
 //
-// Конфигурация проверяется до остановки ядра: негодная правка не должна уносить
-// с собой работающий сервер.
+// Всё, что можно проверить до остановки ядра, проверяется до неё: негодная правка
+// не должна уносить с собой работающий сервер. Проверить заранее получается не всё
+// — занятый порт или нечитаемый сертификат вскрываются только на запуске, и тогда
+// сервер остаётся без ядра, пока правку не починят.
 func (d *Daemon) Apply() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	err := d.applyLocked()
+	if err != nil {
+		d.logger.Error("конфигурация не применена", "err", err, "ядро работает", d.core != nil)
+		return err
+	}
+
+	return nil
+}
+
+// applyLocked — работа Apply под уже взятым mu.
+func (d *Daemon) applyLocked() error {
 	cfg, err := d.configLocked()
 	if err != nil {
 		return err
+	}
+
+	if err := d.preflightLocked(cfg); err != nil {
+		return fmt.Errorf("конфигурация негодна: %w", err)
 	}
 
 	if err := d.stopLocked(); err != nil {
@@ -163,7 +195,7 @@ func (d *Daemon) Apply() error {
 		return err
 	}
 
-	d.log.Logger().Info("конфигурация применена")
+	d.logger.Info("конфигурация применена")
 
 	return nil
 }
@@ -182,6 +214,16 @@ func (d *Daemon) configLocked() (config.Config, error) {
 	return cfg, nil
 }
 
+// preflightLocked прогоняет конфигурацию через проверку, которую умеет только тот,
+// кто будет поднимать ядро: панель сертификат не читает. Вызывается под mu.
+func (d *Daemon) preflightLocked(cfg config.Config) error {
+	if d.opts.Preflight == nil {
+		return nil
+	}
+
+	return d.opts.Preflight(cfg)
+}
+
 // startLocked поднимает ядро по готовой конфигурации. Вызывается под mu.
 func (d *Daemon) startLocked(cfg config.Config) error {
 	core, err := d.opts.StartCore(cfg)
@@ -192,7 +234,7 @@ func (d *Daemon) startLocked(cfg config.Config) error {
 	d.core = core
 	go d.watch(core)
 
-	d.log.Logger().Info("ядро запущено", "listen", cfg.Listen)
+	d.logger.Info("ядро запущено", "listen", cfg.Listen)
 
 	return nil
 }
@@ -201,8 +243,6 @@ func (d *Daemon) startLocked(cfg config.Config) error {
 // горутины могли ещё писать в журнал, который мы закроем позже. Вызывается под mu.
 func (d *Daemon) stopLocked() error {
 	core := d.core
-	d.core = nil
-
 	if core == nil {
 		return nil
 	}
@@ -212,14 +252,16 @@ func (d *Daemon) stopLocked() error {
 	}
 
 	if !waitClosed(core.Done()) {
-		d.log.Logger().Error("ядро не отпустило ресурсы вовремя")
+		d.logger.Error("ядро не отпустило ресурсы вовремя")
 	}
+
+	d.core = nil
 
 	return nil
 }
 
-// watch сообщает о падении ядра. Штатная остановка ошибки не даёт, поэтому в
-// канал попадают только аварии.
+// watch сообщает о падении ядра. Штатная остановка ошибки не даёт, поэтому в канал
+// попадают только аварии.
 func (d *Daemon) watch(core Core) {
 	err := <-core.Done()
 	if err == nil {
@@ -227,7 +269,7 @@ func (d *Daemon) watch(core Core) {
 	}
 
 	select {
-	case d.crashed <- err:
+	case d.failures <- failure{core: core, err: err}:
 	default:
 	}
 }

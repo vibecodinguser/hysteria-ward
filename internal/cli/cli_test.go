@@ -109,9 +109,9 @@ func TestRunServeStopsOnContextCancel(t *testing.T) {
 	logPath := filepath.Join(dir, "panel.log")
 
 	seedConfig(t, dbPath, config.Config{
-		Listen: "127.0.0.1:0",
-		TLS:    config.TLS{Cert: certPath, Key: keyPath},
-		Masq:   config.Masquerade{Mode: config.MasqOff},
+		Listen:     "127.0.0.1:0",
+		TLS:        config.TLS{Cert: certPath, Key: keyPath},
+		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -138,15 +138,19 @@ func TestRunServeStopsOnContextCancel(t *testing.T) {
 	waitForLog(t, logPath, "панель остановлена")
 }
 
-// TestRunServeRunsWithoutCore — ядро без сертификата не поднимется, но панель
-// обязана работать: иначе администратор не откроет интерфейс и не починит
+// TestRunServeRunsWithoutCore — ядро без читаемого сертификата не поднимется, но
+// панель обязана работать: иначе администратор не откроет интерфейс и не починит
 // конфигурацию снаружи.
 func TestRunServeRunsWithoutCore(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "hysteria-ward.db")
 	logPath := filepath.Join(dir, "panel.log")
 
-	seedConfig(t, dbPath, config.Default())
+	seedConfig(t, dbPath, config.Config{
+		Listen:     "127.0.0.1:0",
+		TLS:        config.TLS{Cert: filepath.Join(dir, "нет.pem"), Key: filepath.Join(dir, "нет.key")},
+		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -157,7 +161,7 @@ func TestRunServeRunsWithoutCore(t *testing.T) {
 		done <- cli.Run(ctx, []string{"serve", "--db", dbPath, "--log", logPath}, &stdout, &stderr)
 	}()
 
-	waitForLog(t, logPath, "ядро не запустилось")
+	waitForLog(t, logPath, "конфигурация не применена")
 
 	select {
 	case code := <-done:

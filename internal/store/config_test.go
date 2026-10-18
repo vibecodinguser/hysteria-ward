@@ -39,8 +39,8 @@ func TestSaveAndReadConfig(t *testing.T) {
 			Cert: "/etc/hysteria-ward/certs/panel.crt",
 			Key:  "/etc/hysteria-ward/certs/panel.key",
 		},
-		Obfs: config.Obfs{Password: "salamander"},
-		Masq: config.Masquerade{Mode: config.MasqProxy, Proxy: "https://example.com"},
+		Obfs:       config.Obfs{Password: "salamander"},
+		Masquerade: config.Masquerade{Mode: config.MasqueradeProxy, Proxy: "https://example.com"},
 	}
 
 	first, err := store.Open(path)

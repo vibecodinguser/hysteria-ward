@@ -7,75 +7,85 @@ import (
 	"bytes"
 	"fmt"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
-// MasqMode — что показывать постороннему запросу, пришедшему не по протоколу
-// Hysteria.
-type MasqMode string
+// MasqueradeMode — что показывать постороннему запросу, пришедшему не по
+// протоколу Hysteria.
+type MasqueradeMode string
 
 const (
-	// MasqOff — не отвечать подставным содержимым.
-	MasqOff MasqMode = "off"
-	// MasqFile — отдавать свой сайт.
-	MasqFile MasqMode = "file"
-	// MasqProxy — служить зеркалом чужого сайта.
-	MasqProxy MasqMode = "proxy"
+	// MasqueradeOff — не отвечать подставным содержимым.
+	MasqueradeOff MasqueradeMode = "off"
+	// MasqueradeFile — отдавать свой сайт.
+	MasqueradeFile MasqueradeMode = "file"
+	// MasqueradeProxy — служить зеркалом чужого сайта.
+	MasqueradeProxy MasqueradeMode = "proxy"
 )
 
 // Config — конфигурация сервера.
+//
+// Имена в базе и в YAML заданы тегами, а не именами полей: переименование поля в
+// Go не должно превращаться в молчаливую потерю настройки.
 type Config struct {
-	Listen string     `yaml:"listen"`
-	TLS    TLS        `yaml:"tls"`
-	Obfs   Obfs       `yaml:"obfs"`
-	Masq   Masquerade `yaml:"masquerade"`
+	Listen     string     `json:"listen" yaml:"listen"`
+	TLS        TLS        `json:"tls" yaml:"tls"`
+	Obfs       Obfs       `json:"obfs" yaml:"obfs"`
+	Masquerade Masquerade `json:"masquerade" yaml:"masquerade"`
 }
 
 // TLS — где лежат сертификат и ключ.
 type TLS struct {
-	Cert string `yaml:"cert"`
-	Key  string `yaml:"key"`
+	Cert string `json:"cert" yaml:"cert"`
+	Key  string `json:"key" yaml:"key"`
 }
 
 // Obfs — обфускация salamander. Пустой пароль означает, что она выключена.
 type Obfs struct {
-	Password string `yaml:"password"`
+	Password string `json:"password" yaml:"password"`
 }
 
 // Masquerade — подставной ответ на посторонний запрос.
 type Masquerade struct {
-	Mode  MasqMode `yaml:"mode"`
-	File  string   `yaml:"file"`
-	Proxy string   `yaml:"proxy"`
+	Mode  MasqueradeMode `json:"mode" yaml:"mode"`
+	File  string         `json:"file" yaml:"file"`
+	Proxy string         `json:"proxy" yaml:"proxy"`
 }
 
-// Default — конфигурация нового сервера: штатный порт Hysteria 2, без
-// обфускации и masquerade.
+// Default — начальное состояние новой панели: штатный порт Hysteria 2, без
+// обфускации и masquerade. Годным к запуску его делает сертификат, который
+// появится на шаге домена.
 func Default() Config {
 	return Config{
-		Listen: ":443",
-		Masq:   Masquerade{Mode: MasqOff},
+		Listen:     ":443",
+		Masquerade: Masquerade{Mode: MasqueradeOff},
 	}
 }
 
-// Validate проверяет, что конфигурация годна к запуску.
+// Validate проверяет, что конфигурация годна к запуску. Проверяется только то,
+// что видно без обращения к диску: содержимое сертификата читается отдельно, уже
+// перед остановкой работающего ядра.
 func (c Config) Validate() error {
 	if c.Listen == "" {
 		return fmt.Errorf("не задан адрес прослушивания")
 	}
 
-	switch c.Masq.Mode {
-	case MasqOff:
-	case MasqFile:
-		if c.Masq.File == "" {
+	if c.TLS.Cert == "" || c.TLS.Key == "" {
+		return fmt.Errorf("tls: не заданы пути к сертификату и ключу")
+	}
+
+	switch c.Masquerade.Mode {
+	case MasqueradeOff:
+	case MasqueradeFile:
+		if c.Masquerade.File == "" {
 			return fmt.Errorf("masquerade: не задан каталог сайта")
 		}
-	case MasqProxy:
-		if c.Masq.Proxy == "" {
+	case MasqueradeProxy:
+		if c.Masquerade.Proxy == "" {
 			return fmt.Errorf("masquerade: не задан адрес зеркала")
 		}
 	default:
-		return fmt.Errorf("masquerade: неизвестный режим %q", c.Masq.Mode)
+		return fmt.Errorf("masquerade: неизвестный режим %q", c.Masquerade.Mode)
 	}
 
 	return nil
