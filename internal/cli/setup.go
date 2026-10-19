@@ -38,6 +38,9 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	mode := fs.String("masquerade", "", "режим masquerade: off, file или proxy")
 	modeFile := fs.String("masquerade-file", "", "каталог сайта для режима file")
 	modeProxy := fs.String("masquerade-proxy", "", "адрес зеркала для режима proxy")
+	acmeMode := fs.String("acme-mode", string(store.DefaultACMESettings().Mode), "способ проверки ACME: http или dns")
+	acmeDirectory := fs.String("acme-directory", "", "адрес ACME-каталога (по умолчанию Let's Encrypt)")
+	acmeDNSHook := fs.String("acme-dns-hook", "", "программа для записей TXT при проверке dns")
 	passwordStdin := fs.Bool("password-stdin", false, "прочитать пароль администратора из stdin")
 	generate := fs.Bool("generate-password", false, "сгенерировать пароль и напечатать его один раз")
 	check := fs.Bool("check", false, "только проверить ответы, ничего не записывать")
@@ -74,9 +77,16 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	acme := store.ACMESettings{Mode: *acmeMode, Directory: *acmeDirectory, DNSHook: *acmeDNSHook}
+	if err := setupACME(acme); err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
+
 	setup := store.InitialSetup{
 		Domain:    *domain,
 		ACMEEmail: *email,
+		ACME:      acme,
 		Config:    cfg,
 		Panel:     panel,
 		Admin:     authn.Credential{Name: authn.DefaultName},
@@ -162,6 +172,7 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "e-mail ACME: %s\n", setup.ACMEEmail)
 	fmt.Fprintf(stdout, "панель: %s, порт %d\n", accessText(panel.Access), panel.Port)
 	fmt.Fprintf(stdout, "masquerade: %s\n", masqueradeText(masquerade))
+	fmt.Fprintf(stdout, "ACME: %s\n", acmeText(setup.ACME))
 
 	if *generate {
 		// Пароль печатается ровно один раз: в базе остался только хеш, и
@@ -170,6 +181,28 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	return 0
+}
+
+// setupACME проверяет настройки выпуска сертификата. Хук DNS должен быть
+// исполняемым файлом: иначе выпуск дойдёт до проверки и упадёт уже без панели.
+func setupACME(settings store.ACMESettings) error {
+	if err := settings.Validate(); err != nil {
+		return err
+	}
+
+	if settings.Mode != "dns" {
+		return nil
+	}
+
+	info, err := os.Stat(settings.DNSHook)
+	if err != nil {
+		return fmt.Errorf("хук DNS: %w", err)
+	}
+	if info.IsDir() || info.Mode()&0o111 == 0 {
+		return fmt.Errorf("хук DNS %q: нужен исполняемый файл", settings.DNSHook)
+	}
+
+	return nil
 }
 
 // setupMasquerade собирает режим masquerade из ответов и проверяет то, что видно
@@ -250,6 +283,15 @@ func accessText(access store.Access) string {
 	}
 
 	return "SSH-туннель"
+}
+
+// acmeText называет способ проверки ACME для итогового отчёта.
+func acmeText(settings store.ACMESettings) string {
+	if settings.Mode == "dns" {
+		return "DNS-01, хук " + settings.DNSHook
+	}
+
+	return "HTTP-01"
 }
 
 // masqueradeText называет режим masquerade для итогового отчёта.

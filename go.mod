@@ -5,15 +5,16 @@ go 1.26.0
 require (
 	github.com/apernet/hysteria/core/v2 v2.13.0
 	github.com/apernet/hysteria/extras/v2 v2.13.0
+	github.com/apernet/quic-go v0.63.1-0.20261004180939-a10df75c260c
 	go.etcd.io/bbolt v1.5.0
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/crypto v0.54.0
 	golang.org/x/term v0.47.0
+	rsc.io/qr v0.2.0
 )
 
 require (
 	github.com/andybalholm/brotli v1.1.0 // indirect
-	github.com/apernet/quic-go v0.63.1-0.20261004180939-a10df75c260c // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
@@ -23,5 +24,4 @@ require (
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
-	rsc.io/qr v0.2.0 // indirect
 )

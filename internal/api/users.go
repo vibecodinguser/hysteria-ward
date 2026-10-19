@@ -333,7 +333,7 @@ func (s *Server) userKey(user store.User) (string, error) {
 		Domain:       domain,
 		Listen:       cfg.Listen,
 		ObfsPassword: cfg.Obfs.Password,
-		Certificate:  s.certificate,
+		Certificate:  s.currentCertificate(),
 	}, user.Password)
 }
 

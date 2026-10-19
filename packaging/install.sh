@@ -44,6 +44,9 @@ DEBUG_MODE="auto"
 # или «не хватает ответа» (если терминала нет).
 DOMAIN=""
 ACME_EMAIL=""
+ACME_MODE="http"
+ACME_DIRECTORY=""
+ACME_DNS_HOOK=""
 PANEL_ACCESS=""
 MASQUERADE=""
 MASQUERADE_FILE=""
@@ -79,6 +82,9 @@ usage() {
 Ответы конфигуратора:
   --domain ИМЯ           домен сервера, например example.com
   --email АДРЕС          e-mail для ACME
+  --acme-mode РЕЖИМ      http (порт 80) или dns (запись TXT через хук)
+  --acme-directory URL   адрес ACME-каталога (по умолчанию Let's Encrypt)
+  --acme-dns-hook ФАЙЛ   исполняемая программа для записей TXT при dns
   --access РЕЖИМ         tunnel (SSH-туннель) или public (снаружи)
   --masquerade РЕЖИМ     off, file или proxy
   --masquerade-file КАТ  каталог сайта для file
@@ -323,6 +329,14 @@ show_answers() {
 	off) MASQUERADE_TEXT="off" ;;
 	esac
 
+	case "$ACME_MODE" in
+	dns) ACME_TEXT="DNS-01, хук ${ACME_DNS_HOOK}" ;;
+	*) ACME_TEXT="HTTP-01" ;;
+	esac
+	if [ -n "$ACME_DIRECTORY" ]; then
+		ACME_TEXT="${ACME_TEXT}, каталог ${ACME_DIRECTORY}"
+	fi
+
 	case "$PASSWORD_MODE" in
 	generate) PASSWORD_TEXT="будет сгенерирован и показан один раз" ;;
 	file) PASSWORD_TEXT="из файла ${PASSWORD_FILE}" ;;
@@ -334,6 +348,7 @@ show_answers() {
 Будет установлено:
   домен:        ${DOMAIN}
   e-mail ACME:  ${ACME_EMAIL}
+  сертификат:   ${ACME_TEXT}
   панель:       ${ACCESS_TEXT}
   masquerade:   ${MASQUERADE_TEXT}
   пароль:       ${PASSWORD_TEXT}
@@ -353,6 +368,34 @@ validate_answers() {
 		die "домен должен быть вида example.com, без схемы, пути и порта: $DOMAIN"
 	valid_email "$ACME_EMAIL" ||
 		die "e-mail должен быть полным адресом вида name@example.com: $ACME_EMAIL"
+
+	ACME_MODE="$(trim "$ACME_MODE")"
+	ACME_DIRECTORY="$(trim "$ACME_DIRECTORY")"
+	ACME_DNS_HOOK="$(trim "$ACME_DNS_HOOK")"
+
+	case "$ACME_MODE" in
+	http)
+		[ -z "$ACME_DNS_HOOK" ] ||
+			die "для проверки ACME http не нужен --acme-dns-hook"
+		;;
+	dns)
+		[ -n "$ACME_DNS_HOOK" ] ||
+			die "для проверки ACME dns нужен --acme-dns-hook"
+		if [ ! -f "$ACME_DNS_HOOK" ] || [ ! -x "$ACME_DNS_HOOK" ]; then
+			die "хук DNS должен быть исполняемым файлом: $ACME_DNS_HOOK"
+		fi
+		;;
+	*)
+		die "способ проверки ACME: http или dns, получено: $ACME_MODE"
+		;;
+	esac
+
+	if [ -n "$ACME_DIRECTORY" ]; then
+		case "$ACME_DIRECTORY" in
+		http://?*|https://?*) ;;
+		*) die "адрес ACME-каталога должен начинаться с http:// или https://: $ACME_DIRECTORY" ;;
+		esac
+	fi
 
 	case "$PANEL_ACCESS" in
 	tunnel|public) ;;
@@ -416,7 +459,15 @@ run_setup() (
 
 	set -- setup --db "$DB" --domain "$DOMAIN" --email "$ACME_EMAIL" \
 		--access "$PANEL_ACCESS" --masquerade "$MASQUERADE" \
+		--acme-mode "$ACME_MODE" \
 		--cert "$CERT" --key "$KEY"
+
+	if [ -n "$ACME_DIRECTORY" ]; then
+		set -- "$@" --acme-directory "$ACME_DIRECTORY"
+	fi
+	if [ -n "$ACME_DNS_HOOK" ]; then
+		set -- "$@" --acme-dns-hook "$ACME_DNS_HOOK"
+	fi
 
 	case "$MASQUERADE" in
 	file) set -- "$@" --masquerade-file "$MASQUERADE_FILE" ;;
@@ -478,6 +529,33 @@ while [ "$#" -gt 0 ]; do
 		;;
 	--email=*)
 		ACME_EMAIL="${1#*=}"
+		shift
+		;;
+	--acme-mode)
+		[ "$#" -ge 2 ] || die "после --acme-mode нужен режим"
+		ACME_MODE="$2"
+		shift 2
+		;;
+	--acme-mode=*)
+		ACME_MODE="${1#*=}"
+		shift
+		;;
+	--acme-directory)
+		[ "$#" -ge 2 ] || die "после --acme-directory нужен адрес"
+		ACME_DIRECTORY="$2"
+		shift 2
+		;;
+	--acme-directory=*)
+		ACME_DIRECTORY="${1#*=}"
+		shift
+		;;
+	--acme-dns-hook)
+		[ "$#" -ge 2 ] || die "после --acme-dns-hook нужен путь"
+		ACME_DNS_HOOK="$2"
+		shift 2
+		;;
+	--acme-dns-hook=*)
+		ACME_DNS_HOOK="${1#*=}"
 		shift
 		;;
 	--access)
@@ -609,7 +687,7 @@ if [ -s "$DB" ]; then
 fi
 
 if [ "$CONFIGURED" -eq 1 ]; then
-	if [ -n "$DOMAIN$ACME_EMAIL$PANEL_ACCESS$MASQUERADE$MASQUERADE_FILE$MASQUERADE_PROXY$PASSWORD_FILE" ] ||
+	if [ -n "$DOMAIN$ACME_EMAIL$ACME_DIRECTORY$ACME_DNS_HOOK$PANEL_ACCESS$MASQUERADE$MASQUERADE_FILE$MASQUERADE_PROXY$PASSWORD_FILE" ] ||
 		[ "$GENERATE_PASSWORD" -eq 1 ]; then
 		warn "панель уже настроена: ответы конфигуратора не применяются"
 	fi
@@ -736,6 +814,13 @@ if [ "$CONFIGURED" -eq 0 ] && [ "$MASQUERADE" = "file" ]; then
 	if ! runuser -u "$SERVICE_USER" -- test -r "$MASQUERADE_FILE" ||
 		! runuser -u "$SERVICE_USER" -- test -x "$MASQUERADE_FILE"; then
 		die "каталог сайта $MASQUERADE_FILE недоступен пользователю $SERVICE_USER: нужны права на чтение и проход"
+	fi
+fi
+
+# Хук DNS запускает служба, а не root: проверяем его от её имени.
+if [ "$CONFIGURED" -eq 0 ] && [ "$ACME_MODE" = "dns" ]; then
+	if ! runuser -u "$SERVICE_USER" -- test -x "$ACME_DNS_HOOK"; then
+		die "хук DNS $ACME_DNS_HOOK недоступен пользователю $SERVICE_USER: нужен исполняемый файл"
 	fi
 fi
 
@@ -967,6 +1052,12 @@ fi
 
 # --- итог ------------------------------------------------------------------
 
+if [ "$CONFIGURED" -eq 0 ]; then
+	CERT_SUMMARY="Способ проверки: ${ACME_TEXT}."
+else
+	CERT_SUMMARY="Настройки ACME сохранены при установке."
+fi
+
 info "готово"
 "$BIN" --version
 
@@ -981,7 +1072,11 @@ cat <<EOF
 и зайти на https://127.0.0.1:8443
 
 В публичном режиме панель слушает 8443 на всех интерфейсах — откройте её по
-адресу сервера.
+адресу https://panel.${DOMAIN}:8443 после выпуска сертификата.
+
+Сертификат панель выпускает и продлевает сама. ${CERT_SUMMARY} Для HTTP-01
+домен должен указывать на этот сервер, а порт 80 быть свободен; выпуск идёт в
+фоне, панель при этом уже работает.
 
 Пароль администратора задан при установке. Сменить его:
   systemctl stop ${PRODUCT}
@@ -1002,7 +1097,8 @@ if [ "$USE_DEBUG" -eq 1 ]; then
 
 Сертификата для домена пока нет, поэтому панель поднята с самоподписанным:
 браузер предупредит о недоверенном сертификате. Это временный режим до выпуска
-сертификата ACME; после появления сертификата в ${CERTS_DIR} повторный запуск
-установщика уберёт его.
+сертификата ACME. Панель выпустит его сама и продолжит работать; после появления
+файла в ${CERTS_DIR} повторный запуск установщика уберёт временный режим.
+Причину отказа выпуска и повтор смотрите в интерфейсе панели.
 EOF
 fi

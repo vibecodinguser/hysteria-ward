@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/vibecodinguser/hysteria-ward/internal/certs"
 	"github.com/vibecodinguser/hysteria-ward/internal/config"
 )
 
@@ -52,6 +53,13 @@ func (s *Server) handleSetServer(w http.ResponseWriter, r *http.Request) {
 		s.answerStoreError(w, "запись домена", err)
 
 		return
+	}
+
+	// Новый домен требует нового сертификата: прежний выписан на другие имена.
+	// Имена обновляются до пробуждения выпуска, а сам выпуск идёт в фоне.
+	if s.certificates != nil && request.Domain != "" {
+		s.certificates.SetNames(certs.Hosts(request.Domain))
+		s.certificates.Kick()
 	}
 
 	s.logger.Info("домен сервера записан", "domain", strings.TrimSpace(request.Domain))

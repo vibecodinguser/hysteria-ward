@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/api"
@@ -53,6 +54,9 @@ var usage = fmt.Sprintf(`%[1]s — панель управления серве�
   --masquerade        off, file или proxy
   --masquerade-file   каталог сайта для file
   --masquerade-proxy  адрес зеркала для proxy
+  --acme-mode         способ проверки ACME: http или dns (по умолчанию http)
+  --acme-directory    адрес ACME-каталога (по умолчанию Let's Encrypt)
+  --acme-dns-hook     программа, которая заводит записи TXT для dns
   --password-stdin    прочитать пароль администратора из stdin
   --generate-password сгенерировать пароль и показать его один раз
   --check             только проверить ответы, ничего не записывать
@@ -150,40 +154,140 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 
 // startPanel собирает HTTPS-сервер интерфейса.
 //
-// Сертификат берётся из настроек — тот же, что и у ядра. В отладочном запуске,
-// если настоящего сертификата ещё нет, выписывается самоподписанный: браузер его
-// не признает, но посмотреть панель до появления домена можно.
+// Сертификат берётся из настроек — тот же, что и у ядра. Пока настоящего нет,
+// панель открывается с самоподписанным: иначе при провале ACME администратор
+// остался бы без входа и не смог бы ничего исправить. Настоящий сертификат
+// выпускается и продлевается в фоне, а оба слушателя берут его на ходу.
 func startPanel(opts daemon.PanelOptions, debug bool) (daemon.Panel, error) {
-	certificate, err := loadCertificate(opts.Config)
+	manager := certs.NewManager(opts.Config.TLS.Cert, opts.Config.TLS.Key)
+
+	domain, err := opts.Store.Domain()
 	if err != nil {
-		if !debug {
-			return nil, err
-		}
-
-		opts.Logger.Warn("настоящий сертификат не читается, беру самоподписанный", "err", err)
-
-		settings, err := opts.Store.PanelSettings()
-		if err != nil {
-			return nil, err
-		}
-
-		certificate, err = certs.SelfSigned(panelHosts(settings.Addr())...)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
+	}
+	if domain != "" {
+		manager.SetNames(certs.Hosts(domain))
 	}
 
+	certificate, err := certs.Load(opts.Config.TLS.Cert, opts.Config.TLS.Key)
+	if err != nil {
+		email, emailErr := opts.Store.ACMEEmail()
+		if emailErr != nil {
+			return nil, emailErr
+		}
+
+		acmeConfigured := domain != "" && email != ""
+
+		if !debug && !acmeConfigured {
+			return nil, err
+		}
+
+		opts.Logger.Warn("настоящий сертификат не читается, беру самоподписанный",
+			"err", err, "acme", acmeConfigured)
+
+		settings, settingsErr := opts.Store.PanelSettings()
+		if settingsErr != nil {
+			return nil, settingsErr
+		}
+
+		hosts := panelHosts(settings.Addr())
+		if domain != "" {
+			hosts = append(hosts, certs.Hosts(domain)...)
+		}
+
+		certificate, err = certs.SelfSigned(hosts...)
+		if err != nil {
+			return nil, err
+		}
+
+		manager.SetPlaceholder(certificate)
+	} else {
+		manager.Set(certificate)
+	}
+
+	// После «Применить» сертификат перечитывается с диска: файлы могли заменить,
+	// и панель должна отдавать тот же сертификат, что ядро, и считать отпечаток
+	// для новых ключей по нему.
+	apply := func() error {
+		err := opts.Apply()
+
+		// Сертификат перечитывается и при отказе ядра: файл уже мог замениться, и
+		// панель должна показывать то же, что лежит на диске.
+		switch reloadErr := manager.Reload(); {
+		case reloadErr == nil:
+		case errors.Is(reloadErr, fs.ErrNotExist):
+			// Сертификата ещё нет — это обычное состояние до выпуска, а не поломка.
+			opts.Logger.Debug("сертификат ещё не выпущен")
+		default:
+			opts.Logger.Error("сертификат не перечитан", "err", reloadErr)
+		}
+
+		return err
+	}
+
+	background := acmeBackground(opts, manager, apply)
+
 	return api.New(api.Options{
-		Certificate: certificate,
-		Handler:     ui.Handler(),
-		Auth:        opts.Auth,
-		Store:       opts.Store,
-		Users:       opts.Users,
-		Metrics:     opts.Metrics,
-		CoreRunning: opts.CoreRunning,
-		Apply:       opts.Apply,
-		Logger:      opts.Logger,
+		Certificate:  certificate,
+		Certificates: manager,
+		Background:   background,
+		Handler:      ui.Handler(),
+		Auth:         opts.Auth,
+		Store:        opts.Store,
+		Users:        opts.Users,
+		Metrics:      opts.Metrics,
+		CoreRunning:  opts.CoreRunning,
+		Apply:        apply,
+		Logger:       opts.Logger,
 	})
+}
+
+// acmeBackground собирает фоновый выпуск сертификата. Без домена и почты
+// выпускать нечего, и панель работает со статическим сертификатом.
+func acmeBackground(opts daemon.PanelOptions, manager *certs.Manager, apply func() error) func(context.Context) {
+	domain, err := opts.Store.Domain()
+	if err != nil {
+		opts.Logger.Error("домен для ACME", "err", err)
+		return nil
+	}
+
+	email, err := opts.Store.ACMEEmail()
+	if err != nil {
+		opts.Logger.Error("e-mail для ACME", "err", err)
+		return nil
+	}
+
+	if domain == "" || email == "" {
+		return nil
+	}
+
+	settings, err := opts.Store.ACMESettings()
+	if err != nil {
+		opts.Logger.Error("настройки ACME", "err", err)
+		return nil
+	}
+
+	config := certs.ACMEConfig{
+		Names:          certs.Hosts(domain),
+		Email:          email,
+		DirectoryURL:   settings.Directory,
+		AccountKeyPath: certs.AccountKeyPath(opts.Config.TLS.Cert),
+		CertPath:       opts.Config.TLS.Cert,
+		KeyPath:        opts.Config.TLS.Key,
+		Mode:           certs.Mode(settings.Mode),
+		DNSHook:        settings.DNSHook,
+		Logger:         opts.Logger,
+	}
+
+	return func(ctx context.Context) {
+		onRenew := func() {
+			if err := apply(); err != nil {
+				opts.Logger.Error("ядро не подхватило новый сертификат", "err", err)
+			}
+		}
+
+		certs.Run(ctx, manager, config, onRenew)
+	}
 }
 
 // panelHosts — имена, которые должен покрывать отладочный сертификат: панель

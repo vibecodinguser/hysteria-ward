@@ -27,6 +27,7 @@ var ErrAlreadyConfigured = errors.New("панель уже настроена")
 type InitialSetup struct {
 	Domain    string
 	ACMEEmail string
+	ACME      ACMESettings
 	Config    config.Config
 	Panel     PanelSettings
 	Admin     authn.Credential
@@ -58,6 +59,11 @@ func ValidateInitialSetup(setup InitialSetup) (InitialSetup, error) {
 		return InitialSetup{}, errors.New("e-mail для ACME не задан")
 	}
 
+	acme := setup.ACME.withDefaults()
+	if err := acme.Validate(); err != nil {
+		return InitialSetup{}, err
+	}
+
 	cfg := setup.Config.FillDefaults()
 	if err := cfg.Validate(); err != nil {
 		return InitialSetup{}, fmt.Errorf("конфигурация сервера: %w", err)
@@ -77,6 +83,7 @@ func ValidateInitialSetup(setup InitialSetup) (InitialSetup, error) {
 
 	setup.Domain = domain
 	setup.ACMEEmail = email
+	setup.ACME = acme
 	setup.Config = cfg
 	setup.Panel = panel
 
@@ -104,6 +111,11 @@ func (s *Store) ApplyInitialSetup(setup InitialSetup) error {
 		return fmt.Errorf("сериализация настроек панели: %w", err)
 	}
 
+	rawACME, err := json.Marshal(setup.ACME)
+	if err != nil {
+		return fmt.Errorf("сериализация настроек ACME: %w", err)
+	}
+
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		app, err := appStateBucket(tx)
 		if err != nil {
@@ -121,7 +133,8 @@ func (s *Store) ApplyInitialSetup(setup InitialSetup) error {
 		}
 
 		if app.Get(keyDomain) != nil || app.Get(keyACMEEmail) != nil ||
-			app.Get(keyPanel) != nil || cfg.Get(keyServerConfig) != nil ||
+			app.Get(keyPanel) != nil || app.Get(keyACME) != nil ||
+			cfg.Get(keyServerConfig) != nil ||
 			auth.Get(keyAdminHash) != nil {
 			return ErrAlreadyConfigured
 		}
@@ -131,6 +144,9 @@ func (s *Store) ApplyInitialSetup(setup InitialSetup) error {
 		}
 		if err := app.Put(keyACMEEmail, []byte(setup.ACMEEmail)); err != nil {
 			return fmt.Errorf("e-mail для ACME: %w", err)
+		}
+		if err := app.Put(keyACME, rawACME); err != nil {
+			return fmt.Errorf("настройки ACME: %w", err)
 		}
 		if err := app.Put(keyPanel, rawPanel); err != nil {
 			return fmt.Errorf("настройки панели: %w", err)

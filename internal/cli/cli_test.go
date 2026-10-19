@@ -228,6 +228,61 @@ func TestRunServeDebugWithoutCertificate(t *testing.T) {
 	}
 }
 
+// TestRunServeStartsWithPendingCertificate — домен и почта заданы, а сертификата
+// ещё нет: панель открывается с самоподписанным даже без --debug. Иначе провал
+// ACME оставил бы администратора без входа и без способа починить настройку.
+func TestRunServeStartsWithPendingCertificate(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "hysteria-ward.db")
+	logPath := filepath.Join(dir, "panel.log")
+	certPath := filepath.Join(dir, "certs", "fullchain.pem")
+	keyPath := filepath.Join(dir, "certs", "privkey.pem")
+
+	panelAddr := seedPanel(t, dbPath, config.Config{
+		Listen:     "127.0.0.1:0",
+		TLS:        config.TLS{Cert: certPath, Key: keyPath},
+		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
+	})
+
+	// Выпуск настраивается на DNS с заведомо падающим хуком: тест не должен
+	// занимать порт 80 и ходить в настоящий ACME.
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	if err := s.SaveDomain("example.com"); err != nil {
+		t.Fatalf("SaveDomain() = %v", err)
+	}
+	if err := s.SaveACMEEmail("admin@example.com"); err != nil {
+		t.Fatalf("SaveACMEEmail() = %v", err)
+	}
+	if err := s.SaveACMESettings(store.ACMESettings{Mode: "dns", DNSHook: "/bin/false"}); err != nil {
+		t.Fatalf("SaveACMESettings() = %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() = %v", err)
+	}
+
+	panel := serve(t, "--db", dbPath, "--log", logPath)
+
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+
+	waitForInterface(t, client, panelAddr)
+
+	if log := readLog(t, logPath); !strings.Contains(log, "самоподписанный") {
+		t.Errorf("в журнале нет предупреждения о самоподписанном сертификате: %q", log)
+	}
+
+	panel.cancel()
+
+	if code := panel.wait(t); code != 0 {
+		t.Fatalf("Run(serve) = %d, ожидалось 0; stderr: %q", code, panel.stderr.String())
+	}
+}
+
 // TestRunServeLoginCycle — панель целиком: вход по HTTPS, работа под сессией,
 // выход и отказ после выхода.
 //

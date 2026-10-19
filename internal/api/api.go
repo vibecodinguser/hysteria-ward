@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/authn"
+	"github.com/vibecodinguser/hysteria-ward/internal/certs"
 	"github.com/vibecodinguser/hysteria-ward/internal/metrics"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
 	"github.com/vibecodinguser/hysteria-ward/internal/users"
@@ -41,8 +42,18 @@ const (
 
 // Options — что слушать и что отдавать.
 type Options struct {
-	// Certificate — сертификат для HTTPS.
+	// Certificate — сертификат для HTTPS. В бою вместо него передаётся
+	// Certificates: сертификат меняется на ходу, при продлении.
 	Certificate tls.Certificate
+
+	// Certificates — держатель сертификата, который умеет меняться без
+	// перезапуска панели. Необязателен: тесты и статический запуск обходятся
+	// Certificate.
+	Certificates *certs.Manager
+
+	// Background — работа, которая идёт всё время жизни панели, например выпуск
+	// и продление сертификата. Необязательна.
+	Background func(context.Context)
 
 	// Handler — что отдавать после входа: интерфейс панели.
 	Handler http.Handler
@@ -82,13 +93,15 @@ type Server struct {
 
 	// auth, store, users, metrics и coreRunning — то, чем панель отвечает на
 	// запросы: вход, настройки, пользователи, трафик и состояние ядра.
-	auth        *authn.Service
-	store       *store.Store
-	users       *users.Registry
-	metrics     *metrics.Collector
-	certificate tls.Certificate
-	coreRunning func() bool
-	apply       func() error
+	auth         *authn.Service
+	store        *store.Store
+	users        *users.Registry
+	metrics      *metrics.Collector
+	certificate  tls.Certificate
+	certificates *certs.Manager
+	background   func(context.Context)
+	coreRunning  func() bool
+	apply        func() error
 
 	// stopped закрывается при остановке панели. Потоки метрик живут дольше
 	// обычного запроса, и без этого сигнала остановка ждала бы их до конца
@@ -135,7 +148,7 @@ func New(opts Options) (*Server, error) {
 	if opts.Apply == nil {
 		return nil, errors.New("не задано применение конфигурации")
 	}
-	if len(opts.Certificate.Certificate) == 0 {
+	if len(opts.Certificate.Certificate) == 0 && opts.Certificates == nil {
 		// Без сертификата сервер поднялся бы, но не смог бы ответить ни одному
 		// клиенту: рукопожатие падает уже после того, как панель объявила себя
 		// работающей.
@@ -153,29 +166,38 @@ func New(opts Options) (*Server, error) {
 	}
 
 	server := &Server{
-		settings:    settings,
-		listener:    listener,
-		logger:      opts.Logger,
-		auth:        opts.Auth,
-		store:       opts.Store,
-		users:       opts.Users,
-		metrics:     opts.Metrics,
-		certificate: opts.Certificate,
-		coreRunning: opts.CoreRunning,
-		apply:       opts.Apply,
-		silent:      make(map[net.Conn]struct{}),
-		stopped:     make(chan struct{}),
+		settings:     settings,
+		listener:     listener,
+		logger:       opts.Logger,
+		auth:         opts.Auth,
+		store:        opts.Store,
+		users:        opts.Users,
+		metrics:      opts.Metrics,
+		certificate:  opts.Certificate,
+		certificates: opts.Certificates,
+		background:   opts.Background,
+		coreRunning:  opts.CoreRunning,
+		apply:        opts.Apply,
+		silent:       make(map[net.Conn]struct{}),
+		stopped:      make(chan struct{}),
 	}
+
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if opts.Certificates != nil {
+		// Сертификат берётся при каждом рукопожатии: продление подменяет его без
+		// перезапуска.
+		tlsConfig.GetCertificate = opts.Certificates.GetCertificate
+	} else {
+		tlsConfig.Certificates = []tls.Certificate{opts.Certificate}
+	}
+
 	server.http = &http.Server{
 		Handler:           server.routes(opts.Handler),
 		ConnState:         server.trackConn,
 		ErrorLog:          slog.NewLogLogger(opts.Logger.Handler(), slog.LevelError),
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{opts.Certificate},
-			MinVersion:   tls.VersionTLS12,
-		},
+		TLSConfig:         tlsConfig,
 	}
 
 	opts.Logger.Info("интерфейс открыт", "addr", settings.Addr(), "access", string(settings.Access))
@@ -214,6 +236,9 @@ func (s *Server) routes(panel http.Handler) http.Handler {
 	mux.HandleFunc("GET /api/server", s.protect(s.handleServer))
 	mux.HandleFunc("PUT /api/server", s.protect(s.handleSetServer))
 	mux.HandleFunc("POST /api/server/apply", s.protect(s.handleApplyServer))
+
+	mux.HandleFunc("GET /api/certificate", s.protect(s.handleCertificate))
+	mux.HandleFunc("POST /api/certificate/issue", s.protect(s.handleIssueCertificate))
 
 	mux.HandleFunc("GET /api/users", s.protect(s.handleUsers))
 	mux.HandleFunc("POST /api/users", s.protect(s.handleCreateUser))
@@ -259,6 +284,17 @@ func (s *Server) address() string {
 	defer s.mu.Unlock()
 
 	return s.settings.Addr()
+}
+
+// currentCertificate отдаёт сертификат, который панель предъявляет сейчас. Ключи
+// собираются по нему же: отпечаток в ключе должен совпадать с тем сертификатом,
+// который клиент увидит при подключении.
+func (s *Server) currentCertificate() tls.Certificate {
+	if s.certificates != nil {
+		return s.certificates.Current()
+	}
+
+	return s.certificate
 }
 
 // Access — режим доступа, в котором панель слушает сейчас.
@@ -423,6 +459,12 @@ func (s *Server) Run(ctx context.Context) error {
 	// Отмена контекста — та же остановка.
 	stopAfter := context.AfterFunc(ctx, stop)
 	defer stopAfter()
+
+	// Выпуск сертификата идёт рядом с обслуживанием: панель не должна ждать
+	// ACME, чтобы открыться.
+	if s.background != nil {
+		go s.background(ctx)
+	}
 
 	for {
 		s.mu.Lock()

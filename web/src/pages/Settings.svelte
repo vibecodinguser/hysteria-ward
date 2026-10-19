@@ -28,8 +28,17 @@
 	let masqueradeApplied = $state(false)
 	let masqueradeFailure = $state(null)
 
+	// Сертификат: состояние выпуска и путь повторить, если ACME не ответил.
+	// Панель выпускает его в фоне, поэтому страница только показывает, что вышло.
+	let certificate = $state(null)
+	let certificateLoading = $state(true)
+	let certificateFailure = $state(null)
+	let certificateSending = $state(false)
+	let certificateRequested = $state(false)
+
 	load()
 	loadServer()
+	loadCertificate()
 
 	async function load() {
 		try {
@@ -141,6 +150,62 @@
 		}
 	}
 
+	async function loadCertificate() {
+		try {
+			const answer = await apiFetch('/api/certificate')
+			if (!answer.ok) {
+				certificateFailure = m.settings_certificate_failed()
+				return
+			}
+
+			certificate = await answer.json()
+		} catch {
+			certificateFailure = m.settings_certificate_failed()
+		} finally {
+			certificateLoading = false
+		}
+	}
+
+	async function retryCertificate() {
+		// Двойной щелчок не должен слать две команды: выпуск и так один.
+		if (certificateSending) {
+			return
+		}
+
+		certificateSending = true
+		certificateFailure = null
+		certificateRequested = false
+
+		try {
+			const answer = await apiFetch('/api/certificate/issue', { method: 'POST' })
+			if (!answer.ok) {
+				certificateFailure = (await reasonOf(answer)) ?? m.settings_certificate_retry_failed()
+				return
+			}
+
+			certificate = await answer.json()
+			certificateRequested = true
+		} catch {
+			certificateFailure = m.session_unreachable()
+		} finally {
+			certificateSending = false
+		}
+	}
+
+	function moment(value) {
+		return new Date(value).toLocaleString()
+	}
+
+	function known(value) {
+		return Boolean(value) && !value.startsWith('0001-')
+	}
+
+	// В базе способ проверки хранится коротко, а администратору привычнее имя
+	// проверки ACME: http — это HTTP-01, dns — DNS-01.
+	function modeText(mode) {
+		return mode === 'dns' ? 'DNS-01' : 'HTTP-01'
+	}
+
 	async function applyMasquerade() {
 		// Двойной щелчок не должен перезапускать ядро дважды.
 		if (masqueradeApplying) {
@@ -244,6 +309,67 @@
 		{/if}
 	{:else if failure}
 		<p class="mt-2 text-sm text-rose-400" role="alert">{failure}</p>
+	{/if}
+</section>
+
+<section class="mt-6 rounded border border-slate-800 bg-slate-900/40 p-6">
+	<h2 class="font-semibold">{m.settings_certificate_title()}</h2>
+	<p class="mt-2 text-sm text-slate-400">{m.settings_certificate_hint()}</p>
+
+	{#if certificateLoading}
+		<p class="mt-2 text-sm text-slate-400">{m.settings_certificate_loading()}</p>
+	{:else if certificate && !certificate.managed}
+		<p class="mt-2 text-sm text-slate-400">{m.settings_certificate_unmanaged()}</p>
+	{:else if certificate}
+		<p class="mt-4 text-sm text-slate-400">
+			{m.settings_certificate_mode({ mode: modeText(certificate.mode) })}
+		</p>
+		{#if certificate.names.length > 0}
+			<p class="mt-1 text-sm text-slate-400">
+				{m.settings_certificate_names({ names: certificate.names.join(', ') })}
+			</p>
+		{/if}
+
+		{#if certificate.ready}
+			<p class="mt-3 text-sm text-emerald-400" role="status">
+				{m.settings_certificate_ready({ date: moment(certificate.not_after) })}
+			</p>
+		{:else if certificate.placeholder}
+			<p class="mt-3 text-sm text-amber-400" role="status">
+				{m.settings_certificate_placeholder()}
+			</p>
+		{/if}
+
+		{#if certificate.last_error}
+			<p class="mt-3 text-sm text-rose-400" role="alert">
+				{m.settings_certificate_error({ error: certificate.last_error })}
+			</p>
+		{/if}
+		{#if known(certificate.next_attempt)}
+			<p class="mt-2 text-xs text-slate-500">
+				{m.settings_certificate_next({ date: moment(certificate.next_attempt) })}
+			</p>
+		{/if}
+
+		{#if certificate.placeholder || certificate.last_error}
+			<button
+				type="button"
+				disabled={certificateSending}
+				onclick={retryCertificate}
+				class="mt-4 rounded border border-slate-700 px-3 py-2 text-sm text-slate-200 transition-colors hover:border-slate-500 hover:text-white disabled:opacity-60"
+			>
+				{certificateSending ? m.settings_certificate_retrying() : m.settings_certificate_retry()}
+			</button>
+		{/if}
+
+		{#if certificateRequested}
+			<p class="mt-3 text-sm text-emerald-400" role="status">{m.settings_certificate_requested()}</p>
+		{/if}
+		{#if certificateFailure}
+			<p class="mt-3 text-sm text-rose-400" role="alert">{certificateFailure}</p>
+		{/if}
+	{:else if certificateFailure}
+		<p class="mt-2 text-sm text-rose-400" role="alert">{certificateFailure}</p>
 	{/if}
 </section>
 
