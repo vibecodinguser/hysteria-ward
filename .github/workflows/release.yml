@@ -3,6 +3,10 @@ name: Release
 # Релиз собирается на том же self-hosted раннере, что и CI: облачные раннеры
 # аккаунту недоступны, а готовый бинарь должен быть воспроизводим из тега.
 #
+# Обе архитектуры собираются в одной задаче, без upload-artifact: раннер всё
+# равно исполняет задачи по одной, а хранилище артефактов GitHub имеет квоту.
+# Готовые файлы уходят прямо в релиз.
+#
 # Ассеты называются без версии: install.sh скачивает последний релиз по
 # постоянному адресу и не знает тега заранее. Конкретную версию он берёт из
 # каталога /releases/download/<тег>/ с теми же именами файлов.
@@ -20,13 +24,9 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Сборка linux/${{ matrix.goarch }}
+  release:
+    name: Собрать и опубликовать
     runs-on: [self-hosted, hysteria-ward-ci]
-    strategy:
-      fail-fast: false
-      matrix:
-        goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,21 +36,23 @@ jobs:
         with:
           go-version: "1.26"
 
-      - name: Собрать
+      - name: Проверить тег
         env:
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           case "$VERSION" in
             v*) ;;
             *) echo "тег должен начинаться с v: $VERSION"; exit 1 ;;
           esac
-          make build VERSION="$VERSION" COMMIT="$(git rev-parse --short HEAD)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
-      - name: Проверить бинарь
-        if: matrix.goarch == 'amd64'
+      - name: Собрать linux/amd64
+        env:
+          GOOS: linux
+          GOARCH: amd64
         run: |
+          make build VERSION="$VERSION" COMMIT="$COMMIT"
           file bin/hysteria-ward | grep -q "statically linked"
           got="$(./bin/hysteria-ward --version)"
           echo "$got"
@@ -59,37 +61,32 @@ jobs:
             *) echo "неожиданная платформа в --version: $got"; exit 1 ;;
           esac
 
-      - name: Упаковать
-        env:
-          GOARCH: ${{ matrix.goarch }}
-        run: |
-          stage="dist/stage"
+          stage="dist/stage-amd64"
           mkdir -p "$stage"
           cp bin/hysteria-ward "$stage/"
           cp packaging/hysteria-ward.service "$stage/"
           cp LICENSE "$stage/"
-          tar -C "$stage" -czf "dist/hysteria-ward_linux_${GOARCH}.tar.gz" \
+          tar -C "$stage" -czf "dist/hysteria-ward_linux_amd64.tar.gz" \
             hysteria-ward hysteria-ward.service LICENSE
+          rm -rf "$stage"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: hysteria-ward-linux-${{ matrix.goarch }}
-          path: dist/hysteria-ward_linux_${{ matrix.goarch }}.tar.gz
-          if-no-files-found: error
+      - name: Собрать linux/arm64
+        env:
+          GOOS: linux
+          GOARCH: arm64
+        run: |
+          make build VERSION="$VERSION" COMMIT="$COMMIT"
+          file bin/hysteria-ward | grep -q "statically linked"
+          file bin/hysteria-ward | grep -q "ARM aarch64"
 
-  release:
-    name: Публикация
-    needs: build
-    runs-on: [self-hosted, hysteria-ward-ci]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
+          stage="dist/stage-arm64"
+          mkdir -p "$stage"
+          cp bin/hysteria-ward "$stage/"
+          cp packaging/hysteria-ward.service "$stage/"
+          cp LICENSE "$stage/"
+          tar -C "$stage" -czf "dist/hysteria-ward_linux_arm64.tar.gz" \
+            hysteria-ward hysteria-ward.service LICENSE
+          rm -rf "$stage"
 
       - name: Скрипты и контрольные суммы
         run: |
