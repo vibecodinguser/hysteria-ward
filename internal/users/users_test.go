@@ -127,6 +127,42 @@ func TestTrafficStopsForDisabledAndDeleted(t *testing.T) {
 	}
 }
 
+// TestPasswordChangeAffectsOnlyNewConnections — новый пароль пускает, старый уже
+// нет, но уже открытое соединение не рвётся: ядро опознаёт его по идентификатору
+// пользователя, а не по паролю. Переподключившийся клиент придёт с новым ключом.
+func TestPasswordChangeAffectsOnlyNewConnections(t *testing.T) {
+	s := openStore(t)
+	user := addUser(t, s, "alice", "старый")
+
+	registry, err := users.New(s)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	user.Password = "новый"
+	if _, err := s.UpdateUser(user); err != nil {
+		t.Fatalf("UpdateUser() = %v", err)
+	}
+	if err := registry.Reload(); err != nil {
+		t.Fatalf("Reload() = %v", err)
+	}
+
+	if _, ok := registry.Auth("старый"); ok {
+		t.Error("старый пароль всё ещё пускает")
+	}
+
+	id, ok := registry.Auth("новый")
+	if !ok || id != user.ID {
+		t.Fatalf("новый пароль = %q, ok %v; ожидался пользователь %q", id, ok, user.ID)
+	}
+
+	// Соединение, открытое со старым ключом, для учёта трафика — тот же
+	// пользователь, поэтому оно продолжается.
+	if !registry.Traffic(user.ID, 1, 1) {
+		t.Error("соединение пользователя оборвалось из-за смены пароля")
+	}
+}
+
 // TestOnlineState — интерфейс показывает, кто подключён. Состояние живёт в
 // памяти: после перезапуска панели подключатся заново.
 func TestOnlineState(t *testing.T) {
