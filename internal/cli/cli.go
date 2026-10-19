@@ -164,6 +164,7 @@ func startPanel(opts daemon.PanelOptions, debug bool) (daemon.Panel, error) {
 		Users:       opts.Users,
 		Metrics:     opts.Metrics,
 		CoreRunning: opts.CoreRunning,
+		Apply:       opts.Apply,
 		Logger:      opts.Logger,
 	})
 }
@@ -185,14 +186,15 @@ func panelHosts(listen string) []string {
 }
 
 // checkCoreConfig проверяет то, что выясняется только перед запуском: читается ли
-// сертификат. Панель спрашивает это до остановки работающего ядра, чтобы опечатка
-// в пути не унесла с собой живой сервер.
+// сертификат и есть ли каталог подставного сайта. Панель спрашивает это до
+// остановки работающего ядра, чтобы опечатка в пути не унесла с собой живой
+// сервер.
 func checkCoreConfig(cfg config.Config) error {
 	if _, err := loadCertificate(cfg); err != nil {
 		return err
 	}
 
-	return nil
+	return masqueradeOf(cfg.Masquerade).Validate()
 }
 
 // startCore собирает ядро Hysteria 2 по конфигурации из базы.
@@ -210,9 +212,21 @@ func startCore(cfg config.Config, registry *users.Registry, traffic *metrics.Col
 		ListenAddr:    cfg.Listen,
 		TLS:           certificate,
 		ObfsPassword:  cfg.Obfs.Password,
+		Masquerade:    masqueradeOf(cfg.Masquerade),
 		Authenticator: registry,
 		Traffic:       recorder{users: registry, metrics: traffic},
 	})
+}
+
+// masqueradeOf переводит настройку панели в то, что нужно ядру. Словарь режимов
+// у них общий: config и hycore — две стороны одной настройки, и расходиться им
+// незачем.
+func masqueradeOf(m config.Masquerade) hycore.Masquerade {
+	return hycore.Masquerade{
+		Mode:  hycore.MasqueradeMode(m.Mode),
+		File:  m.File,
+		Proxy: m.Proxy,
+	}
 }
 
 // recorder — единственный приёмник, которого ждёт ядро: кого пускать, решает

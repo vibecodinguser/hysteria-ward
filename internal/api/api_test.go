@@ -57,6 +57,7 @@ func options(t *testing.T) api.Options {
 		Store:       db,
 		Users:       registry,
 		Metrics:     traffic,
+		Apply:       func() error { return nil },
 		Logger:      slog.New(slog.DiscardHandler),
 	}
 }

@@ -67,6 +67,10 @@ type Options struct {
 	// честно отвечает, что ядро не работает.
 	CoreRunning func() bool
 
+	// Apply перезапускает ядро с конфигурацией из базы. Обязателен: без него
+	// кнопка «Применить» обещала бы действие, которого нет.
+	Apply func() error
+
 	// Logger — куда писать о запуске, остановке и ошибках сервера.
 	Logger *slog.Logger
 }
@@ -84,6 +88,7 @@ type Server struct {
 	metrics     *metrics.Collector
 	certificate tls.Certificate
 	coreRunning func() bool
+	apply       func() error
 
 	// stopped закрывается при остановке панели. Потоки метрик живут дольше
 	// обычного запроса, и без этого сигнала остановка ждала бы их до конца
@@ -127,6 +132,9 @@ func New(opts Options) (*Server, error) {
 	if opts.Metrics == nil {
 		return nil, errors.New("не задан учёт трафика")
 	}
+	if opts.Apply == nil {
+		return nil, errors.New("не задано применение конфигурации")
+	}
 	if len(opts.Certificate.Certificate) == 0 {
 		// Без сертификата сервер поднялся бы, но не смог бы ответить ни одному
 		// клиенту: рукопожатие падает уже после того, как панель объявила себя
@@ -154,6 +162,7 @@ func New(opts Options) (*Server, error) {
 		metrics:     opts.Metrics,
 		certificate: opts.Certificate,
 		coreRunning: opts.CoreRunning,
+		apply:       opts.Apply,
 		silent:      make(map[net.Conn]struct{}),
 		stopped:     make(chan struct{}),
 	}
@@ -204,6 +213,7 @@ func (s *Server) routes(panel http.Handler) http.Handler {
 
 	mux.HandleFunc("GET /api/server", s.protect(s.handleServer))
 	mux.HandleFunc("PUT /api/server", s.protect(s.handleSetServer))
+	mux.HandleFunc("POST /api/server/apply", s.protect(s.handleApplyServer))
 
 	mux.HandleFunc("GET /api/users", s.protect(s.handleUsers))
 	mux.HandleFunc("POST /api/users", s.protect(s.handleCreateUser))

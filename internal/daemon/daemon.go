@@ -91,6 +91,10 @@ type PanelOptions struct {
 	// CoreRunning сообщает, работает ли ядро: интерфейс показывает это
 	// администратору.
 	CoreRunning func() bool
+
+	// Apply перезапускает ядро с конфигурацией из базы. Через него работает
+	// кнопка «Применить»: интерфейс не трогает ядро сам.
+	Apply func() error
 }
 
 // Daemon — работающая панель: база, журнал и ядро под общим управлением.
@@ -348,6 +352,7 @@ func (d *Daemon) openPanel(ctx context.Context) (<-chan error, error) {
 		Users:       d.users,
 		Metrics:     d.metrics,
 		CoreRunning: d.CoreRunning,
+		Apply:       d.Apply,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("интерфейс не поднялся: %w", err)

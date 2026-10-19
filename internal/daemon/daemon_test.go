@@ -206,6 +206,9 @@ func (f *fakePanel) start(opts daemon.PanelOptions) (daemon.Panel, error) {
 	if opts.Metrics == nil {
 		return nil, errors.New("учёт трафика не передан")
 	}
+	if opts.Apply == nil {
+		return nil, errors.New("применение конфигурации не передано")
+	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()

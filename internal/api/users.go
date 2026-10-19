@@ -41,11 +41,6 @@ type keyAnswer struct {
 	URI string `json:"uri"`
 }
 
-// serverAnswer — настройки сервера, которые нужны клиентам.
-type serverAnswer struct {
-	Domain string `json:"domain"`
-}
-
 // handleUsers перечисляет пользователей.
 func (s *Server) handleUsers(w http.ResponseWriter, _ *http.Request) {
 	list, err := s.store.Users()
@@ -302,55 +297,6 @@ func (s *Server) handleUserQR(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write(picture); err != nil {
 		s.logger.Error("QR-код не отправлен", "err", err)
 	}
-}
-
-// handleServer отдаёт то, что нужно знать клиентам: домен сервера.
-func (s *Server) handleServer(w http.ResponseWriter, _ *http.Request) {
-	domain, err := s.store.Domain()
-	if err != nil {
-		s.answerStoreError(w, "чтение домена", err)
-
-		return
-	}
-
-	s.answerJSON(w, http.StatusOK, serverAnswer{Domain: domain})
-}
-
-// handleSetServer запоминает домен сервера. Порт и остальное ядра живут в
-// конфигурации сервера: их правка применяется отдельно и перезапускает ядро.
-func (s *Server) handleSetServer(w http.ResponseWriter, r *http.Request) {
-	var request struct {
-		Domain string `json:"domain"`
-	}
-
-	if err := decodeBody(w, r, &request); err != nil {
-		s.answerError(w, http.StatusBadRequest, "тело запроса: "+err.Error())
-
-		return
-	}
-
-	if err := s.store.SaveDomain(request.Domain); err != nil {
-		if isBadDomain(err) {
-			s.answerError(w, http.StatusBadRequest, err.Error())
-
-			return
-		}
-
-		s.answerStoreError(w, "запись домена", err)
-
-		return
-	}
-
-	s.logger.Info("домен сервера записан", "domain", strings.TrimSpace(request.Domain))
-
-	domain, err := s.store.Domain()
-	if err != nil {
-		s.answerStoreError(w, "чтение домена", err)
-
-		return
-	}
-
-	s.answerJSON(w, http.StatusOK, serverAnswer{Domain: domain})
 }
 
 // userAnswer превращает запись в то, что видит интерфейс.

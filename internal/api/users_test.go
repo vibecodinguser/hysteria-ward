@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/api"
+	"github.com/vibecodinguser/hysteria-ward/internal/config"
 	"github.com/vibecodinguser/hysteria-ward/internal/keys"
 )
 
@@ -34,9 +35,10 @@ type keyJSON struct {
 	URI string `json:"uri"`
 }
 
-// serverJSON — настройки, нужные клиентам.
+// serverJSON — настройки сервера, какими их отдаёт панель.
 type serverJSON struct {
-	Domain string `json:"domain"`
+	Domain     string            `json:"domain"`
+	Masquerade config.Masquerade `json:"masquerade"`
 }
 
 // createUser заводит пользователя и возвращает его, каким его увидел интерфейс.
