@@ -322,7 +322,7 @@ if [ ! -f "$UNIT" ]; then
 fi
 [ -d /run/systemd/system ] || die "systemd не запущен: обновление рассчитано на systemd-сервер"
 
-for tool in curl tar sha256sum systemctl runuser; do
+for tool in curl tar gzip sha256sum systemctl runuser; do
 	command -v "$tool" >/dev/null 2>&1 || die "не найден $tool: установите пакет, который его содержит"
 done
 
