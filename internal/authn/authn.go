@@ -175,16 +175,7 @@ func New(storage Storage, logger *slog.Logger) (*Service, error) {
 // неудачные попытки живут в памяти. Перезапуск панели счёт обнуляет — за это время
 // перебрать пароль всё равно нельзя.
 func (s *Service) Login(ctx context.Context, addr, name, password string) (Session, error) {
-	// Проверок пароля за раз немного: Argon2id намеренно жадный до памяти, и поток
-	// неудачных попыток без предела съел бы её всю.
-	select {
-	case s.verifications <- struct{}{}:
-		defer func() { <-s.verifications }()
-	case <-ctx.Done():
-		return Session{}, ctx.Err()
-	}
-
-	matched, err := s.credentials(name, password)
+	matched, err := s.verified(ctx, name, password)
 	if err != nil {
 		// Беда на нашей стороне — испорченная база или незаданный пароль — не
 		// повод говорить, что пароль не подошёл.
@@ -207,6 +198,23 @@ func (s *Service) Login(ctx context.Context, addr, name, password string) (Sessi
 	s.forget(addr)
 
 	return s.open()
+}
+
+// verified сообщает, подходит ли пара «имя и пароль».
+//
+// Слот проверки берётся на одну проверку и отпускается вместе с ней: задержка при
+// переборе его не держит.
+func (s *Service) verified(ctx context.Context, name, password string) (bool, error) {
+	// Проверок пароля за раз немного: Argon2id намеренно жадный до памяти, и поток
+	// неудачных попыток без предела съел бы её всю.
+	select {
+	case s.verifications <- struct{}{}:
+		defer func() { <-s.verifications }()
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+
+	return s.credentials(name, password)
 }
 
 // Check узнаёт сессию по токену и продлевает её: пока администратор работает,

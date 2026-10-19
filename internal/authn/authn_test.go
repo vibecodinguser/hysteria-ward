@@ -348,6 +348,39 @@ func TestDelayIsNotSkippedWhenClientHangsUp(t *testing.T) {
 	}
 }
 
+// TestDelayDoesNotHoldVerifySlot — задержка не держит слот проверки пароля.
+//
+// Проверка пароля — единственное, что защищает память от потока попыток, и слотов
+// всего два. Если бы задержка держала слот, перебор, заняв оба слота задержками,
+// закрыл бы вход самому администратору.
+//
+// Слот в тесте один: только так видно, занят ли он задержкой. Сама задержка взята
+// подлиннее самой проверки — иначе мерка не отличила бы их друг от друга.
+func TestDelayDoesNotHoldVerifySlot(t *testing.T) {
+	s, _ := newService(t, newMemoryStorage(t))
+	s.verifications = make(chan struct{}, 1)
+
+	const delayed = "127.0.0.1:5000"
+	wait := delay(freeFailures + 4)
+	s.fail(t, delayed, freeFailures+4)
+
+	go func() {
+		_, _ = s.Login(context.Background(), delayed, "admin", "неверный")
+	}()
+
+	// Даём неудачной попытке дойти до задержки.
+	time.Sleep(20 * time.Millisecond)
+
+	started := time.Now()
+	if _, err := s.Login(context.Background(), "127.0.0.2:5000", "admin", "пароль"); err != nil {
+		t.Fatalf("Login() = %v", err)
+	}
+
+	if elapsed := time.Since(started); elapsed >= wait/2 {
+		t.Errorf("удачный вход занял %v: слот проверки держит задержка", elapsed)
+	}
+}
+
 // TestSuccessfulLoginForgetsFailures — удачный вход обнуляет счёт: задержка не
 // должна висеть на администраторе после того, как он вспомнил пароль.
 func TestSuccessfulLoginForgetsFailures(t *testing.T) {
