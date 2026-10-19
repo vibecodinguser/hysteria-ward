@@ -16,6 +16,7 @@ import (
 	"github.com/vibecodinguser/hysteria-ward/internal/authn"
 	"github.com/vibecodinguser/hysteria-ward/internal/config"
 	"github.com/vibecodinguser/hysteria-ward/internal/logging"
+	"github.com/vibecodinguser/hysteria-ward/internal/metrics"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
 	"github.com/vibecodinguser/hysteria-ward/internal/users"
 )
@@ -45,13 +46,13 @@ type Options struct {
 	// Log — куда писать журнал.
 	Log logging.Options
 
-	// StartCore поднимает ядро по конфигурации и списку пользователей. Отдельной
-	// функцией, а не прямой зависимостью: панель не знает про Hysteria 2 ничего
-	// лишнего, а тест подставляет ядро, которым можно управлять.
+	// StartCore поднимает ядро по конфигурации, списку пользователей и учёту
+	// трафика. Отдельной функцией, а не прямой зависимостью: панель не знает про
+	// Hysteria 2 ничего лишнего, а тест подставляет ядро, которым можно управлять.
 	//
-	// Список пользователей передаётся ядру, а не копируется: правки из интерфейса
+	// Пользователи и учёт передаются ядру, а не копируются: правки из интерфейса
 	// должны доходить до него на ходу, без перезапуска.
-	StartCore func(config.Config, *users.Registry) (Core, error)
+	StartCore func(config.Config, *users.Registry, *metrics.Collector) (Core, error)
 
 	// StartPanel поднимает HTTPS-сервер интерфейса. Всё, что ему нужно, приходит
 	// в PanelOptions: у панели один набор зависимостей, и растёт он здесь, а не в
@@ -84,6 +85,9 @@ type PanelOptions struct {
 	// ядро тут же узнаёт об этом.
 	Users *users.Registry
 
+	// Metrics — трафик и история: обзор показывает их, а ядро пополняет.
+	Metrics *metrics.Collector
+
 	// CoreRunning сообщает, работает ли ядро: интерфейс показывает это
 	// администратору.
 	CoreRunning func() bool
@@ -91,12 +95,13 @@ type PanelOptions struct {
 
 // Daemon — работающая панель: база, журнал и ядро под общим управлением.
 type Daemon struct {
-	opts   Options
-	db     *store.Store
-	log    *logging.Log
-	logger *slog.Logger
-	auth   *authn.Service
-	users  *users.Registry
+	opts    Options
+	db      *store.Store
+	log     *logging.Log
+	logger  *slog.Logger
+	auth    *authn.Service
+	users   *users.Registry
+	metrics *metrics.Collector
 
 	// mu охраняет core. Жизненный цикл ядра целиком идёт под ним, поэтому два
 	// одновременных «Применить» не подерутся за порт.
@@ -149,6 +154,13 @@ func New(opts Options) (*Daemon, error) {
 		return nil, err
 	}
 
+	traffic, err := metrics.New(db, log.Logger())
+	if err != nil {
+		_ = db.Close()
+		_ = log.Close()
+		return nil, err
+	}
+
 	d := &Daemon{
 		opts:     opts,
 		db:       db,
@@ -156,6 +168,7 @@ func New(opts Options) (*Daemon, error) {
 		logger:   log.Logger(),
 		auth:     auth,
 		users:    userList,
+		metrics:  traffic,
 		failures: make(chan failure, 1),
 	}
 
@@ -205,6 +218,11 @@ func (d *Daemon) Users() *users.Registry {
 	return d.users
 }
 
+// Metrics отдаёт учёт трафика: его получают и интерфейс, и ядро.
+func (d *Daemon) Metrics() *metrics.Collector {
+	return d.metrics
+}
+
 // Log отдаёт журнал: страница логов читает последние строки из памяти.
 func (d *Daemon) Log() *logging.Log {
 	return d.log
@@ -219,9 +237,9 @@ func (d *Daemon) CoreRunning() bool {
 	return d.core != nil
 }
 
-// Close закрывает базу и журнал.
+// Close записывает остатки истории, закрывает базу и журнал.
 func (d *Daemon) Close() error {
-	return errors.Join(d.db.Close(), d.log.Close())
+	return errors.Join(d.metrics.Close(), d.db.Close(), d.log.Close())
 }
 
 // Run открывает интерфейс, применяет конфигурацию и работает до отмены контекста
@@ -240,6 +258,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Часы метрик идут всё время работы панели: история пишется и тогда, когда
+	// никто не смотрит на обзор.
+	metricsDone := make(chan struct{})
+	go func() {
+		d.metrics.Run(panelCtx)
+		close(metricsDone)
+	}()
+
 	_ = d.Apply()
 
 	panelErr := d.waitForStop(ctx, panelDone)
@@ -247,6 +273,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// Остановка идёт в обратном порядке: сначала ядро, потом интерфейс — он
 	// рассказывает о том, что происходило с ядром, и должен пережить его.
 	stopPanel()
+	<-metricsDone
 
 	coreErr := d.stopCore()
 
@@ -319,6 +346,7 @@ func (d *Daemon) openPanel(ctx context.Context) (<-chan error, error) {
 		Auth:        d.auth,
 		Store:       d.db,
 		Users:       d.users,
+		Metrics:     d.metrics,
 		CoreRunning: d.CoreRunning,
 	})
 	if err != nil {
@@ -420,7 +448,7 @@ func (d *Daemon) preflightLocked(cfg config.Config) error {
 
 // startLocked поднимает ядро по готовой конфигурации. Вызывается под mu.
 func (d *Daemon) startLocked(cfg config.Config) error {
-	core, err := d.opts.StartCore(cfg, d.users)
+	core, err := d.opts.StartCore(cfg, d.users, d.metrics)
 	if err != nil {
 		return fmt.Errorf("запуск ядра: %w", err)
 	}

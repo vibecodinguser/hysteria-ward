@@ -17,6 +17,7 @@ import (
 	"github.com/vibecodinguser/hysteria-ward/internal/daemon"
 	"github.com/vibecodinguser/hysteria-ward/internal/hycore"
 	"github.com/vibecodinguser/hysteria-ward/internal/logging"
+	"github.com/vibecodinguser/hysteria-ward/internal/metrics"
 	"github.com/vibecodinguser/hysteria-ward/internal/ui"
 	"github.com/vibecodinguser/hysteria-ward/internal/users"
 )
@@ -161,6 +162,7 @@ func startPanel(opts daemon.PanelOptions, debug bool) (daemon.Panel, error) {
 		Auth:        opts.Auth,
 		Store:       opts.Store,
 		Users:       opts.Users,
+		Metrics:     opts.Metrics,
 		CoreRunning: opts.CoreRunning,
 		Logger:      opts.Logger,
 	})
@@ -198,7 +200,7 @@ func checkCoreConfig(cfg config.Config) error {
 // Пользователи приходят списком в памяти: ядро спрашивает его о каждом
 // подключении и каждом пакете, поэтому ходить за ними в базу на горячем пути
 // нельзя. Список перечитывается после каждой правки в интерфейсе.
-func startCore(cfg config.Config, registry *users.Registry) (daemon.Core, error) {
+func startCore(cfg config.Config, registry *users.Registry, traffic *metrics.Collector) (daemon.Core, error) {
 	certificate, err := loadCertificate(cfg)
 	if err != nil {
 		return nil, err
@@ -209,8 +211,37 @@ func startCore(cfg config.Config, registry *users.Registry) (daemon.Core, error)
 		TLS:           certificate,
 		ObfsPassword:  cfg.Obfs.Password,
 		Authenticator: registry,
-		Traffic:       registry,
+		Traffic:       recorder{users: registry, metrics: traffic},
 	})
+}
+
+// recorder — единственный приёмник, которого ждёт ядро: кого пускать, решает
+// список пользователей, а сколько прошло — учёт трафика.
+//
+// Ядро умеет разговаривать только с одним приёмником, и развести эти две заботы
+// по разным местам здесь незачем: обе отвечают на один и тот же вызов.
+type recorder struct {
+	users   *users.Registry
+	metrics *metrics.Collector
+}
+
+// Traffic пропускает пакет и считает его только у того, кого пустили: трафик
+// выключенного пользователя сервер не обслуживает, и в статистику он попасть не
+// должен.
+func (r recorder) Traffic(userID string, tx, rx uint64) bool {
+	if !r.users.Traffic(userID, tx, rx) {
+		return false
+	}
+
+	r.metrics.Add(userID, tx, rx)
+
+	return true
+}
+
+// Online передаёт состояние подключения списку пользователей: «в сети» в
+// интерфейсе показывает именно он.
+func (r recorder) Online(userID string, online bool) {
+	r.users.Online(userID, online)
 }
 
 // loadCertificate читает сертификат панели. Читается при каждом запуске: «Применить»

@@ -14,6 +14,7 @@ import (
 	"github.com/vibecodinguser/hysteria-ward/internal/config"
 	"github.com/vibecodinguser/hysteria-ward/internal/daemon"
 	"github.com/vibecodinguser/hysteria-ward/internal/logging"
+	"github.com/vibecodinguser/hysteria-ward/internal/metrics"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
 	"github.com/vibecodinguser/hysteria-ward/internal/users"
 )
@@ -99,11 +100,12 @@ type fakeFactory struct {
 	mu         sync.Mutex
 	configs    []config.Config
 	registries []*users.Registry
+	traffic    []*metrics.Collector
 	cores      []*fakeCore
 	err        error
 }
 
-func (f *fakeFactory) start(cfg config.Config, registry *users.Registry) (daemon.Core, error) {
+func (f *fakeFactory) start(cfg config.Config, registry *users.Registry, collector *metrics.Collector) (daemon.Core, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -114,9 +116,17 @@ func (f *fakeFactory) start(cfg config.Config, registry *users.Registry) (daemon
 	core := newFakeCore()
 	f.configs = append(f.configs, cfg)
 	f.registries = append(f.registries, registry)
+	f.traffic = append(f.traffic, collector)
 	f.cores = append(f.cores, core)
 
 	return core, nil
+}
+
+func (f *fakeFactory) lastMetrics() *metrics.Collector {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.traffic[len(f.traffic)-1]
 }
 
 func (f *fakeFactory) lastRegistry() *users.Registry {
@@ -169,6 +179,7 @@ type fakePanel struct {
 	configs  []config.Config
 	settings []store.PanelSettings
 	users    []*users.Registry
+	traffic  []*metrics.Collector
 	startErr error
 	runErr   error
 }
@@ -192,6 +203,9 @@ func (f *fakePanel) start(opts daemon.PanelOptions) (daemon.Panel, error) {
 	if opts.Users == nil {
 		return nil, errors.New("пользователи не переданы")
 	}
+	if opts.Metrics == nil {
+		return nil, errors.New("учёт трафика не передан")
+	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -208,6 +222,7 @@ func (f *fakePanel) start(opts daemon.PanelOptions) (daemon.Panel, error) {
 	f.configs = append(f.configs, opts.Config)
 	f.settings = append(f.settings, settings)
 	f.users = append(f.users, opts.Users)
+	f.traffic = append(f.traffic, opts.Metrics)
 
 	return &fakePanelRun{err: f.runErr}, nil
 }
@@ -231,6 +246,13 @@ func (f *fakePanel) lastUsers() *users.Registry {
 	defer f.mu.Unlock()
 
 	return f.users[len(f.users)-1]
+}
+
+func (f *fakePanel) lastMetrics() *metrics.Collector {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.traffic[len(f.traffic)-1]
 }
 
 // certCheck — предполётная проверка в тесте: отвергает конфигурацию, у которой
@@ -452,10 +474,11 @@ func TestRunsWithInterfaceFromConfiguration(t *testing.T) {
 	p.stop(t)
 }
 
-// TestUsersReachCoreAndPanel — у ядра и интерфейса один и тот же список
-// пользователей: интерфейс заводит и удаляет, а ядро тут же пускает или рвёт.
-// Разные списки означали бы, что правка в панели ни на что не влияет.
-func TestUsersReachCoreAndPanel(t *testing.T) {
+// TestUsersAndMetricsReachCoreAndPanel — у ядра и интерфейса одни и те же
+// пользователи и учёт трафика: интерфейс заводит и удаляет, ядро тут же пускает
+// или рвёт, а обзор показывает то, что ядро посчитало. Разные экземпляры
+// означали бы, что правка в панели ни на что не влияет, а графики пусты.
+func TestUsersAndMetricsReachCoreAndPanel(t *testing.T) {
 	p := newPanel(t, runnable())
 	p.start()
 
@@ -472,6 +495,17 @@ func TestUsersReachCoreAndPanel(t *testing.T) {
 
 	if panelRegistry := p.ui.lastUsers(); panelRegistry != registry {
 		t.Errorf("интерфейс получил другой список пользователей: %p вместо %p", panelRegistry, registry)
+	}
+
+	traffic := p.daemon.Metrics()
+	if traffic == nil {
+		t.Fatal("панель осталась без учёта трафика")
+	}
+	if got := p.core.lastMetrics(); got != traffic {
+		t.Errorf("ядро получило другой учёт трафика: %p вместо %p", got, traffic)
+	}
+	if got := p.ui.lastMetrics(); got != traffic {
+		t.Errorf("интерфейс получил другой учёт трафика: %p вместо %p", got, traffic)
 	}
 
 	p.stop(t)
