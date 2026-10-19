@@ -58,6 +58,28 @@ jobs:
       - name: Линтер
         run: golangci-lint run ./...
 
+  scripts:
+    name: Скрипты
+    runs-on: [self-hosted, hysteria-ward-ci]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Синтаксиса мало для настоящей проверки, но это быстро и не даёт
+      # опечатке в установщике дойти до чистого сервера. Полная проверка —
+      # прогон на чистом VPS (issue #23).
+      - name: Проверить синтаксис установочных скриптов
+        run: |
+          found=0
+          for script in packaging/*.sh; do
+            [ -e "$script" ] || continue
+            sh -n "$script"
+            found=1
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "в packaging/ нет shell-скриптов"
+            exit 1
+          fi
+
   ui:
     name: Интерфейс
     runs-on: [self-hosted, hysteria-ward-ci]

@@ -1,0 +1,118 @@
+name: Release
+
+# Релиз собирается на том же self-hosted раннере, что и CI: облачные раннеры
+# аккаунту недоступны, а готовый бинарь должен быть воспроизводим из тега.
+#
+# Ассеты называются без версии: install.sh скачивает последний релиз по
+# постоянному адресу и не знает тега заранее. Конкретную версию он берёт из
+# каталога /releases/download/<тег>/ с теми же именами файлов.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Тег релиза, например v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Сборка linux/${{ matrix.goarch }}
+    runs-on: [self-hosted, hysteria-ward-ci]
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Собрать
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          case "$VERSION" in
+            v*) ;;
+            *) echo "тег должен начинаться с v: $VERSION"; exit 1 ;;
+          esac
+          make build VERSION="$VERSION" COMMIT="$(git rev-parse --short HEAD)"
+
+      - name: Проверить бинарь
+        if: matrix.goarch == 'amd64'
+        run: |
+          file bin/hysteria-ward | grep -q "statically linked"
+          got="$(./bin/hysteria-ward --version)"
+          echo "$got"
+          case "$got" in
+            *"linux/amd64") ;;
+            *) echo "неожиданная платформа в --version: $got"; exit 1 ;;
+          esac
+
+      - name: Упаковать
+        env:
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          stage="dist/stage"
+          mkdir -p "$stage"
+          cp bin/hysteria-ward "$stage/"
+          cp packaging/hysteria-ward.service "$stage/"
+          cp LICENSE "$stage/"
+          tar -C "$stage" -czf "dist/hysteria-ward_linux_${GOARCH}.tar.gz" \
+            hysteria-ward hysteria-ward.service LICENSE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hysteria-ward-linux-${{ matrix.goarch }}
+          path: dist/hysteria-ward_linux_${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Публикация
+    needs: build
+    runs-on: [self-hosted, hysteria-ward-ci]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Скрипты и контрольные суммы
+        run: |
+          cp packaging/install.sh dist/install.sh
+          if [ -f packaging/update.sh ]; then
+            cp packaging/update.sh dist/update.sh
+          fi
+          (
+            cd dist
+            # checksums.txt перечисляет ровно те файлы, которые уезжают в релиз.
+            # install.sh сверяет по нему скачанный архив.
+            if [ -f update.sh ]; then
+              sha256sum hysteria-ward_linux_*.tar.gz install.sh update.sh > checksums.txt
+            else
+              sha256sum hysteria-ward_linux_*.tar.gz install.sh > checksums.txt
+            fi
+            cat checksums.txt
+          )
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
