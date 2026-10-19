@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/authn"
+	"github.com/vibecodinguser/hysteria-ward/internal/metrics"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
 	"github.com/vibecodinguser/hysteria-ward/internal/users"
 )
@@ -58,6 +59,10 @@ type Options struct {
 	// без них интерфейс показывал бы список, который ни на что не влияет.
 	Users *users.Registry
 
+	// Metrics — трафик и его история. Обязательны: обзор без них показывал бы
+	// пустоту вместо того, что через сервер на самом деле прошло.
+	Metrics *metrics.Collector
+
 	// CoreRunning сообщает, работает ли ядро. Необязателен: без него панель
 	// честно отвечает, что ядро не работает.
 	CoreRunning func() bool
@@ -71,13 +76,19 @@ type Server struct {
 	http   *http.Server
 	logger *slog.Logger
 
-	// auth, store, users и coreRunning — то, чем панель отвечает на запросы:
-	// вход, настройки, пользователи и состояние ядра.
+	// auth, store, users, metrics и coreRunning — то, чем панель отвечает на
+	// запросы: вход, настройки, пользователи, трафик и состояние ядра.
 	auth        *authn.Service
 	store       *store.Store
 	users       *users.Registry
+	metrics     *metrics.Collector
 	certificate tls.Certificate
 	coreRunning func() bool
+
+	// stopped закрывается при остановке панели. Потоки метрик живут дольше
+	// обычного запроса, и без этого сигнала остановка ждала бы их до конца
+	// соединения.
+	stopped chan struct{}
 
 	// switchMu выстраивает смены режима доступа в очередь: две команды сразу
 	// перевешивали бы слушатель друг у друга из-под рук.
@@ -113,6 +124,9 @@ func New(opts Options) (*Server, error) {
 	if opts.Users == nil {
 		return nil, errors.New("не заданы пользователи сервера")
 	}
+	if opts.Metrics == nil {
+		return nil, errors.New("не задан учёт трафика")
+	}
 	if len(opts.Certificate.Certificate) == 0 {
 		// Без сертификата сервер поднялся бы, но не смог бы ответить ни одному
 		// клиенту: рукопожатие падает уже после того, как панель объявила себя
@@ -137,9 +151,11 @@ func New(opts Options) (*Server, error) {
 		auth:        opts.Auth,
 		store:       opts.Store,
 		users:       opts.Users,
+		metrics:     opts.Metrics,
 		certificate: opts.Certificate,
 		coreRunning: opts.CoreRunning,
 		silent:      make(map[net.Conn]struct{}),
+		stopped:     make(chan struct{}),
 	}
 	server.http = &http.Server{
 		Handler:           server.routes(opts.Handler),
@@ -196,6 +212,12 @@ func (s *Server) routes(panel http.Handler) http.Handler {
 	mux.HandleFunc("GET /api/users/{id}/key", s.protect(s.handleUserKey))
 	mux.HandleFunc("GET /api/users/{id}/qr", s.protect(s.handleUserQR))
 	mux.HandleFunc("POST /api/users/{id}/password", s.protect(s.handleNewPassword))
+
+	mux.HandleFunc("GET /api/metrics", s.protect(s.handleMetrics))
+	mux.HandleFunc("GET /api/metrics/history", s.protect(s.handleMetricsHistory))
+
+	// Поток живых значений: одно соединение вместо опроса.
+	mux.HandleFunc("GET /api/events", s.protect(s.handleEvents))
 
 	// Незнакомый путь внутри /api/ — ошибка, а не страница интерфейса.
 	mux.HandleFunc("/api/", s.handleUnknownAPI)
@@ -344,6 +366,10 @@ func (s *Server) closeSilent() {
 	defer s.mu.Unlock()
 
 	s.stopping = true
+
+	// Потоки метрик не привязаны к запросу и сами не закончатся: их закрывает
+	// остановка, иначе Shutdown ждал бы их до конца соединения.
+	close(s.stopped)
 
 	for c := range s.silent {
 		_ = c.Close()

@@ -16,6 +16,7 @@ import (
 	"github.com/vibecodinguser/hysteria-ward/internal/api"
 	"github.com/vibecodinguser/hysteria-ward/internal/authn"
 	"github.com/vibecodinguser/hysteria-ward/internal/certs"
+	"github.com/vibecodinguser/hysteria-ward/internal/metrics"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
 	"github.com/vibecodinguser/hysteria-ward/internal/users"
 )
@@ -44,12 +45,18 @@ func options(t *testing.T) api.Options {
 		t.Fatalf("users.New() = %v", err)
 	}
 
+	traffic, err := metrics.New(db, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("metrics.New() = %v", err)
+	}
+
 	return api.Options{
 		Certificate: certificate,
 		Handler:     http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, response) }),
 		Auth:        authService(t, db),
 		Store:       db,
 		Users:       registry,
+		Metrics:     traffic,
 		Logger:      slog.New(slog.DiscardHandler),
 	}
 }

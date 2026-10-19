@@ -220,6 +220,30 @@ func (s *Service) verified(ctx context.Context, name, password string) (bool, er
 // Check узнаёт сессию по токену и продлевает её: пока администратор работает,
 // вход не заканчивается.
 func (s *Service) Check(token string) (Session, error) {
+	session, err := s.Lookup(token)
+	if err != nil {
+		return Session{}, err
+	}
+
+	// Продление доходит до базы не на каждом запросе, а раз в минуту: интерфейс
+	// обращается часто, и запись на каждый запрос была бы записью на диск.
+	now := s.now()
+	if now.Sub(session.Seen) >= renewEvery {
+		session.Seen = now
+		if err := s.storage.SaveSession(session); err != nil {
+			return Session{}, err
+		}
+	}
+
+	return session, nil
+}
+
+// Lookup узнаёт сессию по токену, не продлевая её.
+//
+// Этим пользуется поток метрик: открытая вкладка — не работа администратора, и
+// держать из-за неё вход открытым нельзя. Поток, у которого сессия отжила,
+// закрывается сам, а браузер получает отказ на переподключении.
+func (s *Service) Lookup(token string) (Session, error) {
 	if token == "" {
 		return Session{}, ErrNoSession
 	}
@@ -232,23 +256,13 @@ func (s *Service) Check(token string) (Session, error) {
 		return Session{}, ErrNoSession
 	}
 
-	now := s.now()
-	if session.Expired(now, idle) {
+	if session.Expired(s.now(), idle) {
 		// Отжившую сессию закрываем сразу: понадобиться она уже не может.
 		if err := s.storage.DeleteSession(token); err != nil {
 			s.logger.Error("не удалось закрыть отжившую сессию", "err", err)
 		}
 
 		return Session{}, ErrNoSession
-	}
-
-	// Продление доходит до базы не на каждом запросе, а раз в минуту: интерфейс
-	// обращается часто, и запись на каждый запрос была бы записью на диск.
-	if now.Sub(session.Seen) >= renewEvery {
-		session.Seen = now
-		if err := s.storage.SaveSession(session); err != nil {
-			return Session{}, err
-		}
 	}
 
 	return session, nil
