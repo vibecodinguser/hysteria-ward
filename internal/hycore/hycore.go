@@ -31,6 +31,10 @@ type Config struct {
 	// ObfsPassword включает обфускацию salamander. Пустая строка — выключена.
 	ObfsPassword string
 
+	// Masquerade — чем отвечать постороннему запросу, пришедшему не по
+	// протоколу Hysteria. Пустой режим означает «выключено».
+	Masquerade Masquerade
+
 	// Authenticator отвечает, кто стоит за строкой авторизации.
 	Authenticator Authenticator
 
@@ -75,6 +79,13 @@ func Start(cfg Config) (*Server, error) {
 		return nil, errors.New("не задан приёмник учёта трафика")
 	}
 
+	// Подставной ответ собирается до сети: негодный masquerade не должен
+	// занимать порт, чтобы потом его отпускать.
+	masq, err := masqueradeHandler(cfg.Masquerade)
+	if err != nil {
+		return nil, err
+	}
+
 	addr, err := net.ResolveUDPAddr("udp", cfg.ListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("разбор адреса %q: %w", cfg.ListenAddr, err)
@@ -96,6 +107,7 @@ func Start(cfg Config) (*Server, error) {
 		Conn:          packetConn,
 		Authenticator: &authAdapter{next: cfg.Authenticator},
 		TrafficLogger: &trafficAdapter{next: cfg.Traffic},
+		MasqHandler:   masq,
 	}
 
 	core, err := server.NewServer(coreCfg)

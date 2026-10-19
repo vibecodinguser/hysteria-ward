@@ -119,6 +119,12 @@ func TestValidate(t *testing.T) {
 	proxyWithoutAddr.Masquerade = config.Masquerade{Mode: config.MasqueradeProxy}
 	cases["proxy без адреса"] = proxyWithoutAddr
 
+	for _, raw := range []string{"example.com", "ftp://example.com", "https://"} {
+		brokenProxy := valid()
+		brokenProxy.Masquerade = config.Masquerade{Mode: config.MasqueradeProxy, Proxy: raw}
+		cases["proxy с адресом "+raw] = brokenProxy
+	}
+
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
 			if err := cfg.Validate(); err == nil {
@@ -130,6 +136,20 @@ func TestValidate(t *testing.T) {
 	t.Run("годная конфигурация", func(t *testing.T) {
 		if err := valid().Validate(); err != nil {
 			t.Errorf("Validate() = %v, ожидалось отсутствие ошибки", err)
+		}
+	})
+
+	t.Run("годный сайт и зеркало", func(t *testing.T) {
+		site := valid()
+		site.Masquerade = config.Masquerade{Mode: config.MasqueradeFile, File: "/srv/www"}
+		if err := site.Validate(); err != nil {
+			t.Errorf("file: Validate() = %v, ожидалось отсутствие ошибки", err)
+		}
+
+		mirror := valid()
+		mirror.Masquerade = config.Masquerade{Mode: config.MasqueradeProxy, Proxy: "https://example.com/news"}
+		if err := mirror.Validate(); err != nil {
+			t.Errorf("proxy: Validate() = %v, ожидалось отсутствие ошибки", err)
 		}
 	})
 }

@@ -6,6 +6,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -50,6 +51,34 @@ type Masquerade struct {
 	Mode  MasqueradeMode `json:"mode" yaml:"mode"`
 	File  string         `json:"file" yaml:"file"`
 	Proxy string         `json:"proxy" yaml:"proxy"`
+}
+
+// Validate проверяет, что режим masquerade задан осмысленно.
+//
+// Существование каталога здесь не проверяется: конфигурация может быть черновиком,
+// а диск читает тот, кто применяет настройку. Проверка без диска ловит опечатку в
+// режиме и адресе зеркала ещё до того, как правка уйдёт в базу.
+func (m Masquerade) Validate() error {
+	switch m.Mode {
+	case MasqueradeOff:
+	case MasqueradeFile:
+		if m.File == "" {
+			return fmt.Errorf("masquerade: не задан каталог сайта")
+		}
+	case MasqueradeProxy:
+		if m.Proxy == "" {
+			return fmt.Errorf("masquerade: не задан адрес зеркала")
+		}
+
+		target, err := url.Parse(m.Proxy)
+		if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
+			return fmt.Errorf("masquerade: адрес зеркала должен быть вида http(s)://хост")
+		}
+	default:
+		return fmt.Errorf("masquerade: неизвестный режим %q", m.Mode)
+	}
+
+	return nil
 }
 
 // Default — начальное состояние новой панели: штатный порт Hysteria 2, без
@@ -97,18 +126,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("tls: не заданы пути к сертификату и ключу")
 	}
 
-	switch c.Masquerade.Mode {
-	case MasqueradeOff:
-	case MasqueradeFile:
-		if c.Masquerade.File == "" {
-			return fmt.Errorf("masquerade: не задан каталог сайта")
-		}
-	case MasqueradeProxy:
-		if c.Masquerade.Proxy == "" {
-			return fmt.Errorf("masquerade: не задан адрес зеркала")
-		}
-	default:
-		return fmt.Errorf("masquerade: неизвестный режим %q", c.Masquerade.Mode)
+	if err := c.Masquerade.Validate(); err != nil {
+		return err
 	}
 
 	return nil
