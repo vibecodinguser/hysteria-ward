@@ -18,6 +18,7 @@ import (
 	"github.com/vibecodinguser/hysteria-ward/internal/hycore"
 	"github.com/vibecodinguser/hysteria-ward/internal/logging"
 	"github.com/vibecodinguser/hysteria-ward/internal/ui"
+	"github.com/vibecodinguser/hysteria-ward/internal/users"
 )
 
 // usage — справка. Имя программы подставляется из build.Name, чтобы оно
@@ -159,6 +160,7 @@ func startPanel(opts daemon.PanelOptions, debug bool) (daemon.Panel, error) {
 		Handler:     ui.Handler(),
 		Auth:        opts.Auth,
 		Store:       opts.Store,
+		Users:       opts.Users,
 		CoreRunning: opts.CoreRunning,
 		Logger:      opts.Logger,
 	})
@@ -192,7 +194,11 @@ func checkCoreConfig(cfg config.Config) error {
 }
 
 // startCore собирает ядро Hysteria 2 по конфигурации из базы.
-func startCore(cfg config.Config) (daemon.Core, error) {
+//
+// Пользователи приходят списком в памяти: ядро спрашивает его о каждом
+// подключении и каждом пакете, поэтому ходить за ними в базу на горячем пути
+// нельзя. Список перечитывается после каждой правки в интерфейсе.
+func startCore(cfg config.Config, registry *users.Registry) (daemon.Core, error) {
 	certificate, err := loadCertificate(cfg)
 	if err != nil {
 		return nil, err
@@ -202,8 +208,8 @@ func startCore(cfg config.Config) (daemon.Core, error) {
 		ListenAddr:    cfg.Listen,
 		TLS:           certificate,
 		ObfsPassword:  cfg.Obfs.Password,
-		Authenticator: noUsers{},
-		Traffic:       noTraffic{},
+		Authenticator: registry,
+		Traffic:       registry,
 	})
 }
 
@@ -221,21 +227,3 @@ func loadCertificate(cfg config.Config) (tls.Certificate, error) {
 
 	return certificate, nil
 }
-
-// noUsers отвергает любой ключ: пользователей ещё нет, они появятся вместе с
-// выпуском ключей.
-type noUsers struct{}
-
-func (noUsers) Auth(string) (string, bool) {
-	return "", false
-}
-
-// noTraffic принимает счётчики и никуда их не пишет: статистика появится вместе
-// с пользователями.
-type noTraffic struct{}
-
-func (noTraffic) Traffic(string, uint64, uint64) bool {
-	return true
-}
-
-func (noTraffic) Online(string, bool) {}

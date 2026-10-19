@@ -17,6 +17,7 @@ import (
 	"github.com/vibecodinguser/hysteria-ward/internal/config"
 	"github.com/vibecodinguser/hysteria-ward/internal/logging"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
+	"github.com/vibecodinguser/hysteria-ward/internal/users"
 )
 
 // stopTimeout — сколько панель ждёт, пока ядро отпустит ресурсы. Без предела
@@ -44,10 +45,13 @@ type Options struct {
 	// Log — куда писать журнал.
 	Log logging.Options
 
-	// StartCore поднимает ядро по конфигурации. Отдельной функцией, а не прямой
-	// зависимостью: панель не знает про Hysteria 2 ничего лишнего, а тест
-	// подставляет ядро, которым можно управлять.
-	StartCore func(config.Config) (Core, error)
+	// StartCore поднимает ядро по конфигурации и списку пользователей. Отдельной
+	// функцией, а не прямой зависимостью: панель не знает про Hysteria 2 ничего
+	// лишнего, а тест подставляет ядро, которым можно управлять.
+	//
+	// Список пользователей передаётся ядру, а не копируется: правки из интерфейса
+	// должны доходить до него на ходу, без перезапуска.
+	StartCore func(config.Config, *users.Registry) (Core, error)
 
 	// StartPanel поднимает HTTPS-сервер интерфейса. Всё, что ему нужно, приходит
 	// в PanelOptions: у панели один набор зависимостей, и растёт он здесь, а не в
@@ -76,6 +80,10 @@ type PanelOptions struct {
 	// понадобится следующему экрану интерфейса.
 	Store *store.Store
 
+	// Users — пользователи сервера: интерфейс заводит, правит и удаляет их, а
+	// ядро тут же узнаёт об этом.
+	Users *users.Registry
+
 	// CoreRunning сообщает, работает ли ядро: интерфейс показывает это
 	// администратору.
 	CoreRunning func() bool
@@ -88,6 +96,7 @@ type Daemon struct {
 	log    *logging.Log
 	logger *slog.Logger
 	auth   *authn.Service
+	users  *users.Registry
 
 	// mu охраняет core. Жизненный цикл ядра целиком идёт под ним, поэтому два
 	// одновременных «Применить» не подерутся за порт.
@@ -133,12 +142,20 @@ func New(opts Options) (*Daemon, error) {
 		return nil, err
 	}
 
+	userList, err := users.New(db)
+	if err != nil {
+		_ = db.Close()
+		_ = log.Close()
+		return nil, err
+	}
+
 	d := &Daemon{
 		opts:     opts,
 		db:       db,
 		log:      log,
 		logger:   log.Logger(),
 		auth:     auth,
+		users:    userList,
 		failures: make(chan failure, 1),
 	}
 
@@ -180,6 +197,12 @@ func (d *Daemon) Auth() *authn.Service {
 // панели, и заводить для них отдельные обёртки незачем.
 func (d *Daemon) Store() *store.Store {
 	return d.db
+}
+
+// Users отдаёт список пользователей: он нужен и интерфейсу, и тесту, который
+// проверяет, что правка доходит до ядра.
+func (d *Daemon) Users() *users.Registry {
+	return d.users
 }
 
 // Log отдаёт журнал: страница логов читает последние строки из памяти.
@@ -295,6 +318,7 @@ func (d *Daemon) openPanel(ctx context.Context) (<-chan error, error) {
 		Logger:      d.logger,
 		Auth:        d.auth,
 		Store:       d.db,
+		Users:       d.users,
 		CoreRunning: d.CoreRunning,
 	})
 	if err != nil {
@@ -396,7 +420,7 @@ func (d *Daemon) preflightLocked(cfg config.Config) error {
 
 // startLocked поднимает ядро по готовой конфигурации. Вызывается под mu.
 func (d *Daemon) startLocked(cfg config.Config) error {
-	core, err := d.opts.StartCore(cfg)
+	core, err := d.opts.StartCore(cfg, d.users)
 	if err != nil {
 		return fmt.Errorf("запуск ядра: %w", err)
 	}

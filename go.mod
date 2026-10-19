@@ -23,4 +23,5 @@ require (
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
+	rsc.io/qr v0.2.0 // indirect
 )

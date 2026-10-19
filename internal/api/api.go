@@ -18,6 +18,7 @@ import (
 
 	"github.com/vibecodinguser/hysteria-ward/internal/authn"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
+	"github.com/vibecodinguser/hysteria-ward/internal/users"
 )
 
 const (
@@ -53,6 +54,10 @@ type Options struct {
 	// в ней же запоминает смену режима.
 	Store *store.Store
 
+	// Users — пользователи сервера: кто подключён и кого пускать. Обязательны:
+	// без них интерфейс показывал бы список, который ни на что не влияет.
+	Users *users.Registry
+
 	// CoreRunning сообщает, работает ли ядро. Необязателен: без него панель
 	// честно отвечает, что ядро не работает.
 	CoreRunning func() bool
@@ -66,10 +71,12 @@ type Server struct {
 	http   *http.Server
 	logger *slog.Logger
 
-	// auth, store и coreRunning — то, чем панель отвечает на запросы: вход,
-	// настройки и состояние ядра.
+	// auth, store, users и coreRunning — то, чем панель отвечает на запросы:
+	// вход, настройки, пользователи и состояние ядра.
 	auth        *authn.Service
 	store       *store.Store
+	users       *users.Registry
+	certificate tls.Certificate
 	coreRunning func() bool
 
 	// switchMu выстраивает смены режима доступа в очередь: две команды сразу
@@ -103,6 +110,9 @@ func New(opts Options) (*Server, error) {
 	if opts.Auth == nil {
 		return nil, errors.New("не задан вход в панель")
 	}
+	if opts.Users == nil {
+		return nil, errors.New("не заданы пользователи сервера")
+	}
 	if len(opts.Certificate.Certificate) == 0 {
 		// Без сертификата сервер поднялся бы, но не смог бы ответить ни одному
 		// клиенту: рукопожатие падает уже после того, как панель объявила себя
@@ -126,6 +136,8 @@ func New(opts Options) (*Server, error) {
 		logger:      opts.Logger,
 		auth:        opts.Auth,
 		store:       opts.Store,
+		users:       opts.Users,
+		certificate: opts.Certificate,
 		coreRunning: opts.CoreRunning,
 		silent:      make(map[net.Conn]struct{}),
 	}
@@ -173,6 +185,17 @@ func (s *Server) routes(panel http.Handler) http.Handler {
 	mux.HandleFunc("GET /api/status", s.protect(s.handleStatus))
 	mux.HandleFunc("GET /api/panel", s.protect(s.handlePanel))
 	mux.HandleFunc("POST /api/panel/access", s.protect(s.handleSetAccess))
+
+	mux.HandleFunc("GET /api/server", s.protect(s.handleServer))
+	mux.HandleFunc("PUT /api/server", s.protect(s.handleSetServer))
+
+	mux.HandleFunc("GET /api/users", s.protect(s.handleUsers))
+	mux.HandleFunc("POST /api/users", s.protect(s.handleCreateUser))
+	mux.HandleFunc("PATCH /api/users/{id}", s.protect(s.handleUpdateUser))
+	mux.HandleFunc("DELETE /api/users/{id}", s.protect(s.handleDeleteUser))
+	mux.HandleFunc("GET /api/users/{id}/key", s.protect(s.handleUserKey))
+	mux.HandleFunc("GET /api/users/{id}/qr", s.protect(s.handleUserQR))
+	mux.HandleFunc("POST /api/users/{id}/password", s.protect(s.handleNewPassword))
 
 	// Незнакомый путь внутри /api/ — ошибка, а не страница интерфейса.
 	mux.HandleFunc("/api/", s.handleUnknownAPI)

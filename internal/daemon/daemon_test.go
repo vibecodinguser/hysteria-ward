@@ -15,6 +15,7 @@ import (
 	"github.com/vibecodinguser/hysteria-ward/internal/daemon"
 	"github.com/vibecodinguser/hysteria-ward/internal/logging"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
+	"github.com/vibecodinguser/hysteria-ward/internal/users"
 )
 
 // runnable — конфигурация, годная к запуску. Файлов по этим путям нет: поддельные
@@ -95,13 +96,14 @@ func (f *fakeCore) finishLocked(err error) {
 // fakeFactory поднимает поддельные ядра и запоминает, с какой конфигурацией их
 // поднимали: так видно, что именно попало в ядро.
 type fakeFactory struct {
-	mu      sync.Mutex
-	configs []config.Config
-	cores   []*fakeCore
-	err     error
+	mu         sync.Mutex
+	configs    []config.Config
+	registries []*users.Registry
+	cores      []*fakeCore
+	err        error
 }
 
-func (f *fakeFactory) start(cfg config.Config) (daemon.Core, error) {
+func (f *fakeFactory) start(cfg config.Config, registry *users.Registry) (daemon.Core, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -111,9 +113,17 @@ func (f *fakeFactory) start(cfg config.Config) (daemon.Core, error) {
 
 	core := newFakeCore()
 	f.configs = append(f.configs, cfg)
+	f.registries = append(f.registries, registry)
 	f.cores = append(f.cores, core)
 
 	return core, nil
+}
+
+func (f *fakeFactory) lastRegistry() *users.Registry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.registries[len(f.registries)-1]
 }
 
 func (f *fakeFactory) calls() int {
@@ -158,6 +168,7 @@ type fakePanel struct {
 	mu       sync.Mutex
 	configs  []config.Config
 	settings []store.PanelSettings
+	users    []*users.Registry
 	startErr error
 	runErr   error
 }
@@ -178,6 +189,9 @@ func (f *fakePanel) start(opts daemon.PanelOptions) (daemon.Panel, error) {
 	if opts.CoreRunning == nil {
 		return nil, errors.New("состояние ядра не передано")
 	}
+	if opts.Users == nil {
+		return nil, errors.New("пользователи не переданы")
+	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -193,6 +207,7 @@ func (f *fakePanel) start(opts daemon.PanelOptions) (daemon.Panel, error) {
 
 	f.configs = append(f.configs, opts.Config)
 	f.settings = append(f.settings, settings)
+	f.users = append(f.users, opts.Users)
 
 	return &fakePanelRun{err: f.runErr}, nil
 }
@@ -209,6 +224,13 @@ func (f *fakePanel) lastSettings() store.PanelSettings {
 	defer f.mu.Unlock()
 
 	return f.settings[len(f.settings)-1]
+}
+
+func (f *fakePanel) lastUsers() *users.Registry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.users[len(f.users)-1]
 }
 
 // certCheck — предполётная проверка в тесте: отвергает конфигурацию, у которой
@@ -425,6 +447,31 @@ func TestRunsWithInterfaceFromConfiguration(t *testing.T) {
 
 	if got := p.ui.lastSettings(); got != want {
 		t.Errorf("интерфейс поднят с настройками %+v, ожидались %+v", got, want)
+	}
+
+	p.stop(t)
+}
+
+// TestUsersReachCoreAndPanel — у ядра и интерфейса один и тот же список
+// пользователей: интерфейс заводит и удаляет, а ядро тут же пускает или рвёт.
+// Разные списки означали бы, что правка в панели ни на что не влияет.
+func TestUsersReachCoreAndPanel(t *testing.T) {
+	p := newPanel(t, runnable())
+	p.start()
+
+	p.waitForCore(t)
+	waitFor(t, func() bool { return p.ui.calls() > 0 })
+
+	registry := p.daemon.Users()
+	if registry == nil {
+		t.Fatal("панель осталась без списка пользователей")
+	}
+	if got := p.core.lastRegistry(); got != registry {
+		t.Errorf("ядро получило другой список пользователей: %p вместо %p", got, registry)
+	}
+
+	if panelRegistry := p.ui.lastUsers(); panelRegistry != registry {
+		t.Errorf("интерфейс получил другой список пользователей: %p вместо %p", panelRegistry, registry)
 	}
 
 	p.stop(t)

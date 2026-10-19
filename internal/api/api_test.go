@@ -17,6 +17,7 @@ import (
 	"github.com/vibecodinguser/hysteria-ward/internal/authn"
 	"github.com/vibecodinguser/hysteria-ward/internal/certs"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
+	"github.com/vibecodinguser/hysteria-ward/internal/users"
 )
 
 // response — что отдаёт обработчик в тесте.
@@ -38,11 +39,17 @@ func options(t *testing.T) api.Options {
 		t.Fatalf("SavePanelSettings() = %v", err)
 	}
 
+	registry, err := users.New(db)
+	if err != nil {
+		t.Fatalf("users.New() = %v", err)
+	}
+
 	return api.Options{
 		Certificate: certificate,
 		Handler:     http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, response) }),
 		Auth:        authService(t, db),
 		Store:       db,
+		Users:       registry,
 		Logger:      slog.New(slog.DiscardHandler),
 	}
 }
