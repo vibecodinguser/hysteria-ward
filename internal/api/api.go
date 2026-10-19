@@ -89,7 +89,7 @@ func New(opts Options) (*Server, error) {
 		return nil, errors.New("не задан адрес панели")
 	}
 	if opts.Auth == nil {
-		return nil, errors.New("не задана авторизация")
+		return nil, errors.New("не задан вход в панель")
 	}
 	if len(opts.Certificate.Certificate) == 0 {
 		// Без сертификата сервер поднялся бы, но не смог бы ответить ни одному

@@ -8,7 +8,6 @@ import (
 	"net/http"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/authn"
-	"github.com/vibecodinguser/hysteria-ward/internal/build"
 )
 
 const (
@@ -44,16 +43,6 @@ type sessionAnswer struct {
 // errorAnswer — ответ с ошибкой.
 type errorAnswer struct {
 	Error string `json:"error"`
-}
-
-// Status — что панель рассказывает о себе вошедшему.
-type Status struct {
-	// Version — версия панели.
-	Version string `json:"version"`
-
-	// CoreRunning — работает ли ядро Hysteria 2 прямо сейчас. Упавшее ядро не
-	// должно выглядеть как рабочее, даже если панель работает.
-	CoreRunning bool `json:"core_running"`
 }
 
 // handleLogin проверяет имя и пароль и заводит сессию.
@@ -122,11 +111,6 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	s.answerJSON(w, http.StatusOK, sessionAnswer{Name: name, CSRF: sessionFrom(r.Context()).CSRF})
 }
 
-// handleStatus рассказывает вошедшему, что происходит с панелью.
-func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
-	s.answerJSON(w, http.StatusOK, s.currentStatus())
-}
-
 // handleUnknownAPI отвечает на незнакомый путь внутри /api/.
 //
 // Ошибкой, а не страницей интерфейса: иначе опечатка в запросе выглядела бы как
@@ -172,16 +156,6 @@ func changesState(method string) bool {
 	}
 }
 
-// currentStatus собирает ответ о состоянии панели.
-func (s *Server) currentStatus() Status {
-	status := Status{Version: build.Current().Version}
-	if s.coreRunning != nil {
-		status.CoreRunning = s.coreRunning()
-	}
-
-	return status
-}
-
 // setSessionCookie кладёт токен сессии в cookie.
 //
 // HttpOnly обязателен: скрипт на странице до входа дотянуться не должен. Secure
@@ -189,27 +163,32 @@ func (s *Server) currentStatus() Status {
 // ставится — cookie живёт до закрытия браузера, а настоящий срок сессии считает
 // панель, и браузеру об этом знать незачем.
 func (s *Server) setSessionCookie(w http.ResponseWriter, session authn.Session) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    session.Token,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-	})
+	cookie := sessionAttributes()
+	cookie.Value = session.Token
+
+	http.SetCookie(w, cookie)
 }
 
-// clearSessionCookie убирает cookie при выходе.
+// clearSessionCookie убирает cookie при выходе. Из тех же свойств, что и у
+// выданной: cookie с другими свойствами браузер посчитал бы чужой и оставил на
+// месте.
 func (s *Server) clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
+	cookie := sessionAttributes()
+	cookie.MaxAge = -1
+
+	http.SetCookie(w, cookie)
+}
+
+// sessionAttributes — свойства cookie сессии, одинаковые для выдачи и для
+// удаления.
+func sessionAttributes() *http.Cookie {
+	return &http.Cookie{
 		Name:     sessionCookie,
-		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   -1,
-	})
+	}
 }
 
 // sessionToken достаёт токен сессии из cookie.

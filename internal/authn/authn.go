@@ -72,9 +72,17 @@ var (
 	ErrNoSession = errors.New("входа нет")
 )
 
-// Idle — сколько сессия живёт без обращений. Нужно тому, кто ставит cookie: срок
-// жизни сессии считает панель, а не браузер.
-const Idle = idle
+// Credential — учётные данные администратора: имя и хеш его пароля. Ездят они
+// всегда вместе, поэтому и едут одним значением: перепутать местами имя с хешем
+// при таком раскладе негде.
+type Credential struct {
+	// Name — имя, которое администратор вводит при входе.
+	Name string
+
+	// Hash — Argon2id-хеш пароля. Сам пароль не хранится нигде: панели он нужен
+	// только на время проверки.
+	Hash string
+}
 
 // Session — один вход администратора: одно открытое окно, одна сессия.
 type Session struct {
@@ -107,10 +115,10 @@ func (s Session) ValidCSRF(token string) bool {
 // Storage — что authn нужно от базы. Интерфейс объявлен здесь, а не в store:
 // проверка пароля не должна знать ни про bbolt, ни про формат записи.
 type Storage interface {
-	// Credential возвращает имя администратора и хеш его пароля. Последнее
-	// значение ложно, если пароль ещё не задавали.
-	Credential() (name, hash string, ok bool, err error)
-	SaveCredential(name, hash string) error
+	// Credential возвращает учётные данные администратора. Последнее значение
+	// ложно, если пароль ещё не задавали.
+	Credential() (Credential, bool, error)
+	SaveCredential(credential Credential) error
 
 	SaveSession(session Session) error
 	Session(token string) (Session, bool, error)
@@ -126,13 +134,9 @@ type Service struct {
 	storage Storage
 	logger  *slog.Logger
 
-	idle          time.Duration
-	renewEvery    time.Duration
-	freeFailures  int
-	minDelay      time.Duration
-	maxDelay      time.Duration
-	failureForget time.Duration
-	now           func() time.Time
+	// now — часы сервиса. Отдельным полем: сроки жизни сессий и забывание неудач
+	// проверяются сдвигом времени, а не ожиданием.
+	now func() time.Time
 
 	// verifications пропускает проверки пароля по нескольку за раз.
 	verifications chan struct{}
@@ -153,18 +157,12 @@ func New(storage Storage, logger *slog.Logger) (*Service, error) {
 	s := &Service{
 		storage:       storage,
 		logger:        logger,
-		idle:          idle,
-		renewEvery:    renewEvery,
-		freeFailures:  freeFailures,
-		minDelay:      minDelay,
-		maxDelay:      maxDelay,
-		failureForget: failureForget,
 		now:           time.Now,
 		verifications: make(chan struct{}, verificationsAtOnce),
 		failures:      make(map[string]failure),
 	}
 
-	if _, err := storage.DeleteStaleSessions(s.now().Add(-s.idle)); err != nil {
+	if _, err := storage.DeleteStaleSessions(s.now().Add(-idle)); err != nil {
 		return nil, err
 	}
 
@@ -177,19 +175,31 @@ func New(storage Storage, logger *slog.Logger) (*Service, error) {
 // неудачные попытки живут в памяти. Перезапуск панели счёт обнуляет — за это время
 // перебрать пароль всё равно нельзя.
 func (s *Service) Login(ctx context.Context, addr, name, password string) (Session, error) {
-	if err := s.verify(ctx, name, password); err != nil {
-		s.logger.Warn("неудачный вход", "addr", addr, "err", err)
+	// Проверок пароля за раз немного: Argon2id намеренно жадный до памяти, и поток
+	// неудачных попыток без предела съел бы её всю.
+	select {
+	case s.verifications <- struct{}{}:
+		defer func() { <-s.verifications }()
+	case <-ctx.Done():
+		return Session{}, ctx.Err()
+	}
 
+	matched, err := s.credentials(name, password)
+	if err != nil {
+		// Беда на нашей стороне — испорченная база или незаданный пароль — не
+		// повод говорить, что пароль не подошёл.
+		return Session{}, err
+	}
+
+	if !matched {
 		s.remember(addr)
+		s.logger.Warn("неудачный вход", "addr", addr)
 
-		// Ответ задерживается: перебор пароля должен упираться во время, а не в
-		// число попыток.
-		if wait := s.delay(s.failuresOf(addr)); wait > 0 {
-			select {
-			case <-time.After(wait):
-			case <-ctx.Done():
-			}
-		}
+		// Задержка не пропускается отменой запроса: иначе перебирающему
+		// достаточно было бы бросить соединение, чтобы её не ждать, — а в ней
+		// весь смысл. Слот проверки она при этом не держит: иначе перебор,
+		// заняв оба слота задержками, закрыл бы вход самому администратору.
+		<-time.After(delay(s.failuresOf(addr)))
 
 		return Session{}, ErrDenied
 	}
@@ -215,7 +225,7 @@ func (s *Service) Check(token string) (Session, error) {
 	}
 
 	now := s.now()
-	if session.Expired(now, s.idle) {
+	if session.Expired(now, idle) {
 		// Отжившую сессию закрываем сразу: понадобиться она уже не может.
 		if err := s.storage.DeleteSession(token); err != nil {
 			s.logger.Error("не удалось закрыть отжившую сессию", "err", err)
@@ -226,7 +236,7 @@ func (s *Service) Check(token string) (Session, error) {
 
 	// Продление доходит до базы не на каждом запросе, а раз в минуту: интерфейс
 	// обращается часто, и запись на каждый запрос была бы записью на диск.
-	if now.Sub(session.Seen) >= s.renewEvery {
+	if now.Sub(session.Seen) >= renewEvery {
 		session.Seen = now
 		if err := s.storage.SaveSession(session); err != nil {
 			return Session{}, err
@@ -245,28 +255,28 @@ func (s *Service) Logout(token string) error {
 	return s.storage.DeleteSession(token)
 }
 
-// SetCredential задаёт имя администратора и хеш его пароля.
+// SetCredential задаёт учётные данные администратора — и имя, и хеш пароля.
 //
 // Проверять пароль здесь нечем: решение о том, годится ли он, принимает тот, кто
 // его спрашивает.
-func (s *Service) SetCredential(name, hash string) error {
-	if name == "" {
+func (s *Service) SetCredential(credential Credential) error {
+	if credential.Name == "" {
 		return errors.New("не задано имя администратора")
 	}
 
-	return s.storage.SaveCredential(name, hash)
+	return s.storage.SaveCredential(credential)
 }
 
-// Credential возвращает имя администратора и хеш его пароля. Последнее значение
-// ложно, если пароль ещё не задавали.
-func (s *Service) Credential() (string, string, bool, error) {
+// Credential возвращает учётные данные администратора. Последнее значение ложно,
+// если пароль ещё не задавали.
+func (s *Service) Credential() (Credential, bool, error) {
 	return s.storage.Credential()
 }
 
 // AdminName возвращает имя администратора — то, которое интерфейс показывает
 // вошедшему. Пока учётных данных нет, это имя по умолчанию.
 func (s *Service) AdminName() (string, error) {
-	name, _, ok, err := s.storage.Credential()
+	credential, ok, err := s.storage.Credential()
 	if err != nil {
 		return "", err
 	}
@@ -275,7 +285,7 @@ func (s *Service) AdminName() (string, error) {
 		return DefaultName, nil
 	}
 
-	return name, nil
+	return credential.Name, nil
 }
 
 // EnsureCredential заводит учётные данные по умолчанию, если их ещё нет, и
@@ -284,61 +294,53 @@ func (s *Service) AdminName() (string, error) {
 // Возвращаемое значение — повод предупредить администратора, а не ошибка: панель
 // работает и так.
 func (s *Service) EnsureCredential() (bool, error) {
-	name, hash, ok, err := s.storage.Credential()
+	credential, ok, err := s.storage.Credential()
 	if err != nil {
 		return false, err
 	}
 
 	if !ok {
-		fresh, err := Hash(DefaultPassword)
+		hash, err := Hash(DefaultPassword)
 		if err != nil {
 			return false, err
 		}
 
-		return true, s.storage.SaveCredential(DefaultName, fresh)
+		return true, s.storage.SaveCredential(Credential{Name: DefaultName, Hash: hash})
 	}
 
-	matched, err := Verify(hash, DefaultPassword)
+	matched, err := Verify(credential.Hash, DefaultPassword)
 	if err != nil {
 		return false, err
 	}
 
 	// Сверяем и имя: если администратор сменил и его, пароль по умолчанию уже
 	// ничего не открывает.
-	return matched && name == DefaultName, nil
+	return matched && credential.Name == DefaultName, nil
 }
 
-// verify проверяет пару «имя и пароль».
+// credentials сообщает, подходит ли пара «имя и пароль».
 //
 // Проверка идёт до конца и при неверном имени: иначе по времени ответа было бы
 // видно, угадано ли имя, и половина работы перебирающего стала бы бесплатной.
-func (s *Service) verify(ctx context.Context, name, password string) error {
-	storedName, hash, ok, err := s.storage.Credential()
+func (s *Service) credentials(name, password string) (bool, error) {
+	stored, ok, err := s.storage.Credential()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !ok {
-		return errors.New("пароль администратора не задан")
+		return false, errors.New("пароль администратора не задан")
 	}
 
-	// Проверок пароля за раз немного: Argon2id намеренно жадный до памяти.
-	select {
-	case s.verifications <- struct{}{}:
-		defer func() { <-s.verifications }()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
-	matched, err := Verify(hash, password)
+	matched, err := Verify(stored.Hash, password)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	if subtle.ConstantTimeCompare([]byte(name), []byte(storedName)) != 1 || !matched {
-		return errors.New("пароль не подходит")
+	if subtle.ConstantTimeCompare([]byte(name), []byte(stored.Name)) != 1 {
+		return false, nil
 	}
 
-	return nil
+	return matched, nil
 }
 
 // open заводит сессию.
@@ -368,7 +370,7 @@ func (s *Service) remember(addr string) {
 	defer s.mu.Unlock()
 
 	f := s.failures[addr]
-	if s.now().Sub(f.seen) > s.failureForget {
+	if s.now().Sub(f.seen) > failureForget {
 		// Прежние опечатки уже не в счёт: счёт начинается заново.
 		f = failure{}
 	}
@@ -399,19 +401,19 @@ func (s *Service) failuresOf(addr string) int {
 // Первые попытки не задерживаются вовсе: администратор имеет право ошибиться.
 // Дальше задержка удваивается с каждой попыткой, поэтому перебор дорожает не
 // вдвое, а на порядки.
-func (s *Service) delay(count int) time.Duration {
-	extra := count - s.freeFailures
+func delay(count int) time.Duration {
+	extra := count - freeFailures
 	if extra <= 0 {
 		return 0
 	}
 
-	wait := s.minDelay
-	for i := 1; i < extra && wait < s.maxDelay; i++ {
+	wait := minDelay
+	for i := 1; i < extra && wait < maxDelay; i++ {
 		wait *= 2
 	}
 
-	if wait > s.maxDelay {
-		return s.maxDelay
+	if wait > maxDelay {
+		return maxDelay
 	}
 
 	return wait

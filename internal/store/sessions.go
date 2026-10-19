@@ -11,78 +11,9 @@ import (
 	"github.com/vibecodinguser/hysteria-ward/internal/authn"
 )
 
-// Учётные данные администратора и сессии лежат в базе. Сессия обязана переживать
-// перезапуск панели: обновление не должно выбрасывать администратора из панели, а
-// он в этот момент может чинить именно то, ради чего перезапуск и затевался.
-
-var (
-	keyAdminName = []byte("admin_name")
-	keyAdminHash = []byte("admin_hash")
-)
-
-// authBucket достаёт бакет auth. Его заводит схема, поэтому отсутствие бакета
-// означает испорченную базу, а не обычное состояние.
-func authBucket(tx *bolt.Tx) (*bolt.Bucket, error) {
-	b := tx.Bucket(bucketAuth)
-	if b == nil {
-		return nil, errors.New("нет бакета auth")
-	}
-
-	return b, nil
-}
-
-// Credential возвращает имя администратора и хеш его пароля. Последнее значение
-// ложно, если пароль ещё не задавали: тогда в панель не войти никому.
-func (s *Store) Credential() (string, string, bool, error) {
-	var (
-		name string
-		hash string
-		ok   bool
-	)
-
-	err := s.db.View(func(tx *bolt.Tx) error {
-		b, err := authBucket(tx)
-		if err != nil {
-			return err
-		}
-
-		rawName := b.Get(keyAdminName)
-		rawHash := b.Get(keyAdminHash)
-		if rawName == nil || rawHash == nil {
-			return nil
-		}
-
-		name, hash, ok = string(rawName), string(rawHash), true
-
-		return nil
-	})
-	if err != nil {
-		return "", "", false, err
-	}
-
-	return name, hash, ok, nil
-}
-
-// SaveCredential записывает имя администратора и хеш его пароля. Пароль в
-// открытом виде не сохраняется нигде и никогда.
-func (s *Store) SaveCredential(name, hash string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		b, err := authBucket(tx)
-		if err != nil {
-			return err
-		}
-
-		if err := b.Put(keyAdminName, []byte(name)); err != nil {
-			return fmt.Errorf("имя администратора: %w", err)
-		}
-
-		if err := b.Put(keyAdminHash, []byte(hash)); err != nil {
-			return fmt.Errorf("хеш пароля: %w", err)
-		}
-
-		return nil
-	})
-}
+// Сессии лежат в базе, а не в памяти: сессия обязана переживать перезапуск
+// панели. Обновление не должно выбрасывать администратора из панели, а он в этот
+// момент может чинить именно то, ради чего перезапуск и затевался.
 
 // sessionRecord — сессия, как она лежит в базе. Это отдельная от authn.Session
 // структура, потому что запись — это версия формата: меняться она может не
@@ -93,14 +24,44 @@ type sessionRecord struct {
 	Seen    int64  `json:"seen_ns"`
 }
 
-// SaveSession записывает сессию целиком: и вход, и продление — одна и та же
-// запись.
-func (s *Store) SaveSession(session authn.Session) error {
-	raw, err := json.Marshal(sessionRecord{
+// toRecord переводит сессию в то, что ляжет в базу.
+//
+// Времена пишутся целыми наносекундами, а не строкой: разбирать их потом незачем,
+// а сравнивать по времени последнего обращения приходится при каждой чистке.
+func toRecord(session authn.Session) sessionRecord {
+	return sessionRecord{
 		CSRF:    session.CSRF,
 		Created: session.Created.UnixNano(),
 		Seen:    session.Seen.UnixNano(),
-	})
+	}
+}
+
+// fromRecord собирает сессию из записи. Токен берётся из ключа, под которым она
+// лежит: в самой записи он был бы вторым местом для одного и того же.
+func fromRecord(token string, record sessionRecord) authn.Session {
+	return authn.Session{
+		Token:   token,
+		CSRF:    record.CSRF,
+		Created: time.Unix(0, record.Created),
+		Seen:    time.Unix(0, record.Seen),
+	}
+}
+
+// sessionsBucket достаёт бакет sessions. Его заводит схема, поэтому отсутствие
+// бакета означает испорченную базу, а не обычное состояние.
+func sessionsBucket(tx *bolt.Tx) (*bolt.Bucket, error) {
+	b := tx.Bucket(bucketSessions)
+	if b == nil {
+		return nil, errors.New("нет бакета sessions")
+	}
+
+	return b, nil
+}
+
+// SaveSession записывает сессию целиком: и вход, и продление — одна и та же
+// запись.
+func (s *Store) SaveSession(session authn.Session) error {
+	raw, err := json.Marshal(toRecord(session))
 	if err != nil {
 		return fmt.Errorf("сериализация сессии: %w", err)
 	}
@@ -142,12 +103,7 @@ func (s *Store) Session(token string) (authn.Session, bool, error) {
 			return fmt.Errorf("разбор сессии: %w", err)
 		}
 
-		session, ok = authn.Session{
-			Token:   token,
-			CSRF:    record.CSRF,
-			Created: time.Unix(0, record.Created),
-			Seen:    time.Unix(0, record.Seen),
-		}, true
+		session, ok = fromRecord(token, record), true
 
 		return nil
 	})
@@ -207,14 +163,4 @@ func (s *Store) DeleteStaleSessions(before time.Time) (int, error) {
 	}
 
 	return removed, nil
-}
-
-// sessionsBucket достаёт бакет sessions.
-func sessionsBucket(tx *bolt.Tx) (*bolt.Bucket, error) {
-	b := tx.Bucket(bucketSessions)
-	if b == nil {
-		return nil, errors.New("нет бакета sessions")
-	}
-
-	return b, nil
 }

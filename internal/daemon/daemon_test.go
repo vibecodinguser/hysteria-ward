@@ -163,14 +163,14 @@ type fakePanel struct {
 }
 
 func (f *fakePanel) start(opts daemon.PanelOptions) (daemon.Panel, error) {
-	// Журнал, авторизация и состояние ядра обязаны дойти до интерфейса: серверу
-	// есть что сказать о запуске и своих ошибках, пускать он должен по чему-то, а
+	// Журнал, вход и состояние ядра обязаны дойти до интерфейса: серверу есть что
+	// сказать о запуске и своих ошибках, пускать он должен по чему-то, а
 	// показывать администратору — что с ядром.
 	if opts.Logger == nil {
 		return nil, errors.New("журнал не передан")
 	}
 	if opts.Auth == nil {
-		return nil, errors.New("авторизация не передана")
+		return nil, errors.New("вход не передан")
 	}
 	if opts.CoreRunning == nil {
 		return nil, errors.New("состояние ядра не передано")
@@ -642,18 +642,18 @@ func TestSeedsDefaultCredential(t *testing.T) {
 	p := newPanel(t, runnable())
 	p.start()
 
-	name, hash, ok, err := p.daemon.Auth().Credential()
+	credential, ok, err := p.daemon.Auth().Credential()
 	if err != nil {
 		t.Fatalf("Credential() = %v", err)
 	}
 	if !ok {
 		t.Fatal("учётные данные по умолчанию не заведены")
 	}
-	if name != authn.DefaultName {
-		t.Errorf("имя = %q, ожидалось %q", name, authn.DefaultName)
+	if credential.Name != authn.DefaultName {
+		t.Errorf("имя = %q, ожидалось %q", credential.Name, authn.DefaultName)
 	}
 
-	matched, err := authn.Verify(hash, authn.DefaultPassword)
+	matched, err := authn.Verify(credential.Hash, authn.DefaultPassword)
 	if err != nil {
 		t.Fatalf("Verify() = %v", err)
 	}

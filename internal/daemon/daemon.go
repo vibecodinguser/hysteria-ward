@@ -60,7 +60,7 @@ type Options struct {
 	Preflight func(config.Config) error
 }
 
-// PanelOptions — что нужно интерфейсу панели: конфигурация, журнал, авторизация и
+// PanelOptions — что нужно интерфейсу панели: конфигурация, журнал, вход и
 // состояние ядра.
 type PanelOptions struct {
 	// Config — конфигурация панели.
@@ -166,8 +166,8 @@ func (d *Daemon) ensureCredential() error {
 	return nil
 }
 
-// Auth отдаёт авторизацию: она нужна тому, кто собирает интерфейс панели, а
-// заводится здесь, потому что здесь же лежит база.
+// Auth отдаёт вход в панель: он нужен тому, кто собирает интерфейс, а заводится
+// здесь, потому что здесь же лежит база.
 func (d *Daemon) Auth() *authn.Service {
 	return d.auth
 }

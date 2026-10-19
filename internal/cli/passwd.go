@@ -71,7 +71,7 @@ func setPassword(dbPath, name string, stdin io.Reader, stdout, stderr io.Writer)
 		return err
 	}
 
-	if err := auth.SetCredential(admin, hash); err != nil {
+	if err := auth.SetCredential(authn.Credential{Name: admin, Hash: hash}); err != nil {
 		return err
 	}
 

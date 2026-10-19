@@ -9,42 +9,6 @@ import (
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
 )
 
-// *store.Store обязан уметь то, что нужно authn. Проверка стоит здесь, чтобы
-// расхождение нашлось при сборке, а не при первом входе в панель.
-var _ authn.Storage = (*store.Store)(nil)
-
-// TestCredentialRoundTrip — пароль администратора лежит в базе хешем: панель
-// читает его при каждом входе, а не держит в памяти.
-func TestCredentialRoundTrip(t *testing.T) {
-	s := openStore(t)
-
-	if _, _, ok, err := s.Credential(); err != nil {
-		t.Fatalf("Credential() = %v", err)
-	} else if ok {
-		t.Error("в новой базе уже есть пароль")
-	}
-
-	hash, err := authn.Hash("пароль")
-	if err != nil {
-		t.Fatalf("Hash() = %v", err)
-	}
-
-	if err := s.SaveCredential("admin", hash); err != nil {
-		t.Fatalf("SaveCredential() = %v", err)
-	}
-
-	name, got, ok, err := s.Credential()
-	if err != nil {
-		t.Fatalf("Credential() = %v", err)
-	}
-	if !ok {
-		t.Fatal("пароль не сохранился")
-	}
-	if name != "admin" || got != hash {
-		t.Errorf("учётные данные = %q и %q, ожидались %q и %q", name, got, "admin", hash)
-	}
-}
-
 // TestSessionSurvivesRestart — сессия переживает перезапуск панели: иначе
 // обновление выбрасывало бы администратора из панели, а он в этот момент может
 // чинить именно то, ради чего перезапуск и затевался.
@@ -135,21 +99,4 @@ func TestDeleteStaleSessions(t *testing.T) {
 	} else if !ok {
 		t.Error("живую сессию вымели")
 	}
-}
-
-// openStore открывает пустую базу во временном каталоге.
-func openStore(t *testing.T) *store.Store {
-	t.Helper()
-
-	s, err := store.Open(filepath.Join(t.TempDir(), "hysteria-ward.db"))
-	if err != nil {
-		t.Fatalf("Open() = %v", err)
-	}
-	t.Cleanup(func() {
-		if err := s.Close(); err != nil {
-			t.Errorf("Close() = %v", err)
-		}
-	})
-
-	return s
 }

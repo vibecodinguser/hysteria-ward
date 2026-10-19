@@ -325,6 +325,67 @@ func TestRunServeLoginCycle(t *testing.T) {
 	}
 }
 
+// TestRunServeKeepsSessionAcrossRestart — сессия переживает перезапуск панели:
+// обновление панели не должно выбрасывать администратора наружу, тем более что
+// обновляется он ради неё.
+//
+// Проверка сквозная: сессия проходит через остановку процесса, перезапуск, базу и
+// ту же cookie. По частям то же самое проверяют authn и store, здесь важно, что
+// сходится вместе — в том виде, в каком его соберёт serve.
+func TestRunServeKeepsSessionAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := writeCertificate(t, dir)
+	dbPath := filepath.Join(dir, "hysteria-ward.db")
+	logPath := filepath.Join(dir, "panel.log")
+	panelAddr := freeAddr(t)
+
+	seedConfig(t, dbPath, config.Config{
+		Listen:     "127.0.0.1:0",
+		Panel:      config.Panel{Listen: panelAddr},
+		TLS:        config.TLS{Cert: certPath, Key: keyPath},
+		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
+	})
+
+	client := trusting(t, certPath)
+	base := "https://" + panelAddr
+
+	panel := serve(t, "--db", dbPath, "--log", logPath)
+	waitForInterface(t, client, panelAddr)
+
+	status, resp, body := do(t, client, http.MethodPost, base+"/api/login",
+		`{"name":"admin","password":"admin"}`, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("вход = %d (%s), ожидался 200", status, body)
+	}
+
+	var session *http.Cookie
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == "hysteria_ward_session" {
+			session = cookie
+		}
+	}
+	if session == nil {
+		t.Fatal("панель не выдала cookie сессии")
+	}
+
+	panel.cancel()
+	if code := panel.wait(t); code != 0 {
+		t.Fatalf("Run(serve) = %d, ожидалось 0; stderr: %q", code, panel.stderr.String())
+	}
+
+	panel = serve(t, "--db", dbPath, "--log", logPath)
+	waitForInterface(t, client, panelAddr)
+
+	if status, _, _ := do(t, client, http.MethodGet, base+"/api/status", "", session, nil); status != http.StatusOK {
+		t.Errorf("состояние после перезапуска = %d, ожидался 200: сессия не пережила перезапуск", status)
+	}
+
+	panel.cancel()
+	if code := panel.wait(t); code != 0 {
+		t.Fatalf("Run(serve) = %d, ожидалось 0; stderr: %q", code, panel.stderr.String())
+	}
+}
+
 // TestRunPasswdSetsPassword — passwd меняет пароль администратора.
 //
 // Пароль приходит из трубы: так установщик передаст сгенерированный пароль, не
@@ -475,7 +536,7 @@ func credential(t *testing.T, dbPath string) (string, string) {
 	}
 	defer s.Close()
 
-	name, hash, ok, err := s.Credential()
+	credential, ok, err := s.Credential()
 	if err != nil {
 		t.Fatalf("Credential() = %v", err)
 	}
@@ -483,7 +544,7 @@ func credential(t *testing.T, dbPath string) (string, string) {
 		t.Fatal("учётные данные не заданы")
 	}
 
-	return name, hash
+	return credential.Name, credential.Hash
 }
 
 // running — запущенный serve.
