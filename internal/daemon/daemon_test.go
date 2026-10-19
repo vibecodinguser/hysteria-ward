@@ -153,24 +153,27 @@ func (p *fakePanelRun) Run(ctx context.Context) error {
 	return nil
 }
 
-// fakePanel поднимает поддельные HTTPS-серверы и запоминает, с какой конфигурацией
-// их поднимали.
+// fakePanel поднимает поддельные HTTPS-серверы и запоминает, с чем их поднимали.
 type fakePanel struct {
 	mu       sync.Mutex
 	configs  []config.Config
+	settings []store.PanelSettings
 	startErr error
 	runErr   error
 }
 
 func (f *fakePanel) start(opts daemon.PanelOptions) (daemon.Panel, error) {
-	// Журнал, вход и состояние ядра обязаны дойти до интерфейса: серверу есть что
-	// сказать о запуске и своих ошибках, пускать он должен по чему-то, а
-	// показывать администратору — что с ядром.
+	// Журнал, вход, настройки и состояние ядра обязаны дойти до интерфейса:
+	// серверу есть что сказать о запуске и своих ошибках, пускать он должен по
+	// чему-то, слушать — по настройкам, а показывать администратору — что с ядром.
 	if opts.Logger == nil {
 		return nil, errors.New("журнал не передан")
 	}
 	if opts.Auth == nil {
 		return nil, errors.New("вход не передан")
+	}
+	if opts.Store == nil {
+		return nil, errors.New("настройки панели не переданы")
 	}
 	if opts.CoreRunning == nil {
 		return nil, errors.New("состояние ядра не передано")
@@ -183,7 +186,13 @@ func (f *fakePanel) start(opts daemon.PanelOptions) (daemon.Panel, error) {
 		return nil, f.startErr
 	}
 
+	settings, err := opts.Store.PanelSettings()
+	if err != nil {
+		return nil, err
+	}
+
 	f.configs = append(f.configs, opts.Config)
+	f.settings = append(f.settings, settings)
 
 	return &fakePanelRun{err: f.runErr}, nil
 }
@@ -195,11 +204,11 @@ func (f *fakePanel) calls() int {
 	return len(f.configs)
 }
 
-func (f *fakePanel) lastConfig() config.Config {
+func (f *fakePanel) lastSettings() store.PanelSettings {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	return f.configs[len(f.configs)-1]
+	return f.settings[len(f.settings)-1]
 }
 
 // certCheck — предполётная проверка в тесте: отвергает конфигурацию, у которой
@@ -399,19 +408,23 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 	}
 }
 
-// TestRunsWithInterfaceFromConfiguration — интерфейс поднимается по конфигурации из
-// базы: адрес панели админ задаёт в настройках, а не в командной строке.
+// TestRunsWithInterfaceFromConfiguration — интерфейс поднимается по настройкам из
+// базы: кому и на каком порту слушать панель, администратор задаёт в настройках, а
+// не в командной строке.
 func TestRunsWithInterfaceFromConfiguration(t *testing.T) {
-	cfg := runnable()
-	cfg.Panel.Listen = "127.0.0.1:10443"
+	want := store.PanelSettings{Access: store.AccessPublic, Port: 10443}
 
-	p := newPanel(t, cfg)
+	p := newPanel(t, runnable())
+	if err := p.daemon.Store().SavePanelSettings(want); err != nil {
+		t.Fatalf("SavePanelSettings() = %v", err)
+	}
+
 	p.start()
 
 	waitFor(t, func() bool { return p.ui.calls() > 0 })
 
-	if got := p.ui.lastConfig().Panel.Listen; got != "127.0.0.1:10443" {
-		t.Errorf("интерфейс поднят на %q, ожидался 127.0.0.1:10443", got)
+	if got := p.ui.lastSettings(); got != want {
+		t.Errorf("интерфейс поднят с настройками %+v, ожидались %+v", got, want)
 	}
 
 	p.stop(t)

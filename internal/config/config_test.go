@@ -13,7 +13,6 @@ import (
 func valid() config.Config {
 	return config.Config{
 		Listen: ":443",
-		Panel:  config.Panel{Listen: "127.0.0.1:8443"},
 		TLS: config.TLS{
 			Cert: "/etc/hysteria-ward/certs/panel.crt",
 			Key:  "/etc/hysteria-ward/certs/panel.key",
@@ -27,7 +26,6 @@ func valid() config.Config {
 func TestYAMLRoundTrip(t *testing.T) {
 	original := config.Config{
 		Listen: ":8443",
-		Panel:  config.Panel{Listen: "0.0.0.0:9443"},
 		TLS: config.TLS{
 			Cert: "/etc/hysteria-ward/certs/panel.crt",
 			Key:  "/etc/hysteria-ward/certs/panel.key",
@@ -76,9 +74,6 @@ func TestDefault(t *testing.T) {
 	if def.Listen != ":443" {
 		t.Errorf("Listen = %q, ожидалось \":443\"", def.Listen)
 	}
-	if def.Panel.Listen != "127.0.0.1:8443" {
-		t.Errorf("Panel.Listen = %q, ожидалось \"127.0.0.1:8443\"", def.Panel.Listen)
-	}
 	if def.Masquerade.Mode != config.MasqueradeOff {
 		t.Errorf("Masquerade.Mode = %q, ожидался %q", def.Masquerade.Mode, config.MasqueradeOff)
 	}
@@ -107,10 +102,6 @@ func TestValidate(t *testing.T) {
 	certless := valid()
 	certless.TLS = config.TLS{}
 	cases["без сертификата"] = certless
-
-	panelless := valid()
-	panelless.Panel.Listen = ""
-	cases["без адреса панели"] = panelless
 
 	keyless := valid()
 	keyless.TLS.Key = ""

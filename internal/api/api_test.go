@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -32,21 +33,23 @@ func options(t *testing.T) api.Options {
 		t.Fatalf("SelfSigned() = %v", err)
 	}
 
+	db := database(t)
+	if err := db.SavePanelSettings(settings(t)); err != nil {
+		t.Fatalf("SavePanelSettings() = %v", err)
+	}
+
 	return api.Options{
-		Listen:      "127.0.0.1:0",
 		Certificate: certificate,
 		Handler:     http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, response) }),
-		Auth:        authService(t),
+		Auth:        authService(t, db),
+		Store:       db,
 		Logger:      slog.New(slog.DiscardHandler),
 	}
 }
 
-// authService собирает настоящий вход в панель поверх настоящей базы во временном
-// каталоге.
-//
-// Подделка здесь была бы хуже: вход в панель и есть то, что проверяют тесты
-// сервера, — а проверять, что подделка согласна сама с собой, незачем.
-func authService(t *testing.T) *authn.Service {
+// database открывает базу во временном каталоге: сервер и вход работают поверх
+// одной и той же базы, как и в бою.
+func database(t *testing.T) *store.Store {
 	t.Helper()
 
 	db, err := store.Open(filepath.Join(t.TempDir(), "hysteria-ward.db"))
@@ -58,6 +61,65 @@ func authService(t *testing.T) *authn.Service {
 			t.Errorf("Close() = %v", err)
 		}
 	})
+
+	return db
+}
+
+// settings — настройки панели на свободном порту: панель в них слушает петлю, то
+// есть снаружи её не видно.
+//
+// Порт берётся свободный, а не по умолчанию: тесты идут параллельно с рабочей
+// панелью, и порт по умолчанию у них бы отобрали.
+func settings(t *testing.T) store.PanelSettings {
+	t.Helper()
+
+	return store.PanelSettings{Access: store.AccessTunnel, Port: freePort(t)}
+}
+
+// freePort занимает и сразу освобождает порт: тесту нужен номер, который панель
+// сможет занять сама.
+func freePort(t *testing.T) int {
+	t.Helper()
+
+	return portOf(t, freeAddr(t))
+}
+
+// freeAddr занимает и сразу освобождает адрес.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("свободный порт не найден: %v", err)
+	}
+	defer listener.Close()
+
+	return listener.Addr().String()
+}
+
+// portOf достаёт номер порта из адреса.
+func portOf(t *testing.T, addr string) int {
+	t.Helper()
+
+	_, raw, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("адрес %q не разобран: %v", addr, err)
+	}
+
+	number, err := strconv.Atoi(raw)
+	if err != nil {
+		t.Fatalf("порт %q не разобран: %v", raw, err)
+	}
+
+	return number
+}
+
+// authService собирает настоящий вход в панель поверх настоящей базы.
+//
+// Подделка здесь была бы хуже: вход в панель и есть то, что проверяют тесты
+// сервера, — а проверять, что подделка согласна сама с собой, незачем.
+func authService(t *testing.T, db *store.Store) *authn.Service {
+	t.Helper()
 
 	service, err := authn.New(db, slog.New(slog.DiscardHandler))
 	if err != nil {
@@ -77,7 +139,14 @@ func authService(t *testing.T) *authn.Service {
 func server(t *testing.T) *api.Server {
 	t.Helper()
 
-	s, err := api.New(options(t))
+	return start(t, options(t))
+}
+
+// start поднимает сервер по готовым вариантам и останавливает его вместе с тестом.
+func start(t *testing.T, opts api.Options) *api.Server {
+	t.Helper()
+
+	s, err := api.New(opts)
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
@@ -292,15 +361,14 @@ func TestNewRequiresLogger(t *testing.T) {
 	}
 }
 
-// TestNewRequiresAddress — пустой адрес отвергается. Пустая строка в net.Listen
-// означает прослушивание всех интерфейсов, то есть панель, выставленную наружу
-// помимо воли администратора.
-func TestNewRequiresAddress(t *testing.T) {
+// TestNewRequiresSettings — без настроек панели сервер не знает, кому слушать, а
+// решил бы это за администратора и, скорее всего, в худшую сторону.
+func TestNewRequiresSettings(t *testing.T) {
 	opts := options(t)
-	opts.Listen = ""
+	opts.Store = nil
 
 	if _, err := api.New(opts); err == nil {
-		t.Fatal("New() с пустым адресом прошёл, ожидалась ошибка")
+		t.Fatal("New() без настроек панели прошёл, ожидалась ошибка")
 	}
 }
 
@@ -325,7 +393,11 @@ func TestNewReportsBusyAddress(t *testing.T) {
 	defer busy.Close()
 
 	opts := options(t)
-	opts.Listen = busy.Addr().String()
+	busySettings := settings(t)
+	busySettings.Port = portOf(t, busy.Addr().String())
+	if err := opts.Store.SavePanelSettings(busySettings); err != nil {
+		t.Fatalf("SavePanelSettings() = %v", err)
+	}
 
 	if _, err := api.New(opts); err == nil {
 		t.Fatal("New() на занятом адресе прошёл, ожидалась ошибка")

@@ -302,18 +302,39 @@ func (s *Service) AdminName() (string, error) {
 // Возвращаемое значение — повод предупредить администратора, а не ошибка: панель
 // работает и так.
 func (s *Service) EnsureCredential() (bool, error) {
-	credential, ok, err := s.storage.Credential()
+	if _, ok, err := s.storage.Credential(); err != nil {
+		return false, err
+	} else if ok {
+		return s.DefaultPasswordInUse()
+	}
+
+	hash, err := Hash(DefaultPassword)
 	if err != nil {
 		return false, err
 	}
 
-	if !ok {
-		hash, err := Hash(DefaultPassword)
-		if err != nil {
-			return false, err
-		}
+	if err := s.storage.SaveCredential(Credential{Name: DefaultName, Hash: hash}); err != nil {
+		return false, err
+	}
 
-		return true, s.storage.SaveCredential(Credential{Name: DefaultName, Hash: hash})
+	return true, nil
+}
+
+// DefaultPasswordInUse сообщает, открывается ли панель паролем по умолчанию.
+//
+// Нужно не только для предупреждения в журнале: пока этот пароль в силе, панель
+// наружу не выставляют. Пароль по умолчанию знает кто угодно — он написан в
+// документации.
+func (s *Service) DefaultPasswordInUse() (bool, error) {
+	credential, ok, err := s.storage.Credential()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		// Войти некому, и «пароль по умолчанию не в силе» тут было бы неправдой.
+		// Пускать наружу такую панель всё равно нельзя, но пусть причина будет
+		// названа честно.
+		return false, errors.New("пароль администратора не задан")
 	}
 
 	matched, err := Verify(credential.Hash, DefaultPassword)

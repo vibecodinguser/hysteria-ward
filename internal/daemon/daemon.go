@@ -60,8 +60,8 @@ type Options struct {
 	Preflight func(config.Config) error
 }
 
-// PanelOptions — что нужно интерфейсу панели: конфигурация, журнал, вход и
-// состояние ядра.
+// PanelOptions — что нужно интерфейсу панели: конфигурация, журнал, вход,
+// настройки и состояние ядра.
 type PanelOptions struct {
 	// Config — конфигурация панели.
 	Config config.Config
@@ -71,6 +71,10 @@ type PanelOptions struct {
 
 	// Auth — вход в панель.
 	Auth *authn.Service
+
+	// Store — база: кому и на каком порту слушать панель, а также остальное, что
+	// понадобится следующему экрану интерфейса.
+	Store *store.Store
 
 	// CoreRunning сообщает, работает ли ядро: интерфейс показывает это
 	// администратору.
@@ -290,6 +294,7 @@ func (d *Daemon) openPanel(ctx context.Context) (<-chan error, error) {
 		Config:      cfg,
 		Logger:      d.logger,
 		Auth:        d.auth,
+		Store:       d.db,
 		CoreRunning: d.CoreRunning,
 	})
 	if err != nil {

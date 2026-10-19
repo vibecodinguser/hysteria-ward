@@ -16,9 +16,6 @@ const (
 
 	// csrfHeader — заголовок, которым интерфейс предъявляет csrf-токен.
 	csrfHeader = "X-CSRF-Token"
-
-	// maxLoginBody — предел на тело запроса входа: там только имя и пароль.
-	maxLoginBody = 4 << 10
 )
 
 // sessionKey — ключ, под которым защищённый обработчик находит сессию.
@@ -52,7 +49,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLoginBody)).Decode(&request); err != nil {
+	if err := decodeBody(w, r, &request); err != nil {
 		s.answerError(w, http.StatusBadRequest, "запрос не разобран")
 		return
 	}

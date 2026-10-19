@@ -46,8 +46,9 @@ var usage = fmt.Sprintf(`%[1]s — панель управления серве�
 набранное, из трубы — одной строкой. Панель перед сменой пароля нужно остановить:
 пока она работает, база занята.
 
-Сам сервер настраивается в базе: адрес ядра, адрес панели, сертификат, обфускация
-и masquerade хранятся там и меняются из интерфейса панели.
+Сам сервер настраивается в базе: адрес ядра, сертификат, обфускация и masquerade
+хранятся там и меняются из интерфейса панели. Там же лежит и режим доступа к самой
+панели: по умолчанию она слушает петлю, а публичный доступ включается из интерфейса.
 `, build.Name, defaultDBPath, defaultLogPath)
 
 // Где панель хранит базу и журнал по умолчанию. Пути в духе FHS: настройки и
@@ -142,17 +143,22 @@ func startPanel(opts daemon.PanelOptions, debug bool) (daemon.Panel, error) {
 
 		opts.Logger.Warn("настоящий сертификат не читается, беру самоподписанный", "err", err)
 
-		certificate, err = certs.SelfSigned(panelHosts(opts.Config.Panel.Listen)...)
+		settings, err := opts.Store.PanelSettings()
+		if err != nil {
+			return nil, err
+		}
+
+		certificate, err = certs.SelfSigned(panelHosts(settings.Addr())...)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	return api.New(api.Options{
-		Listen:      opts.Config.Panel.Listen,
 		Certificate: certificate,
 		Handler:     ui.Handler(),
 		Auth:        opts.Auth,
+		Store:       opts.Store,
 		CoreRunning: opts.CoreRunning,
 		Logger:      opts.Logger,
 	})
@@ -164,8 +170,10 @@ func panelHosts(listen string) []string {
 	// Разбор может не сработать, а в адресе вроде «:8443» имени хоста нет вовсе.
 	// Тогда остаётся имя по умолчанию: отладочный сертификат нужен ровно для того,
 	// чтобы открыть панель с той же машины.
+	//
+	// Все интерфейсы — тоже не имя: покрывать сертификатом «0.0.0.0» нечего.
 	host, _, err := net.SplitHostPort(listen)
-	if err != nil || host == "" {
+	if err != nil || host == "" || host == "0.0.0.0" || host == "::" {
 		return []string{"localhost"}
 	}
 

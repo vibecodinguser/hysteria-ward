@@ -29,16 +29,9 @@ const (
 // Go не должно превращаться в молчаливую потерю настройки.
 type Config struct {
 	Listen     string     `json:"listen" yaml:"listen"`
-	Panel      Panel      `json:"panel" yaml:"panel"`
 	TLS        TLS        `json:"tls" yaml:"tls"`
 	Obfs       Obfs       `json:"obfs" yaml:"obfs"`
 	Masquerade Masquerade `json:"masquerade" yaml:"masquerade"`
-}
-
-// Panel — HTTPS-сервер самой панели. У него свой адрес, потому что ядро занято
-// клиентским трафиком, и порт панели от него не зависит.
-type Panel struct {
-	Listen string `json:"listen" yaml:"listen"`
 }
 
 // TLS — где лежат сертификат и ключ.
@@ -59,14 +52,15 @@ type Masquerade struct {
 	Proxy string         `json:"proxy" yaml:"proxy"`
 }
 
-// Default — начальное состояние новой панели: штатный порт Hysteria 2, панель на
-// петле (снаружи её не видно, пока доступ не включат явно), без обфускации и
-// masquerade. Годным к запуску его делает сертификат, который появится на шаге
-// домена.
+// Default — начальное состояние новой панели: штатный порт Hysteria 2, без
+// обфускации и masquerade. Годным к запуску его делает сертификат, который
+// появится на шаге домена.
+//
+// Самой панели в этой конфигурации нет: кому и на каком порту она слушает — её
+// собственные настройки (store), а не настройки сервера Hysteria 2.
 func Default() Config {
 	return Config{
 		Listen:     ":443",
-		Panel:      Panel{Listen: "127.0.0.1:8443"},
 		Masquerade: Masquerade{Mode: MasqueradeOff},
 	}
 }
@@ -84,10 +78,6 @@ func (c Config) FillDefaults() Config {
 		c.Listen = defaults.Listen
 	}
 
-	if c.Panel.Listen == "" {
-		c.Panel.Listen = defaults.Panel.Listen
-	}
-
 	if c.Masquerade.Mode == "" {
 		c.Masquerade = defaults.Masquerade
 	}
@@ -101,10 +91,6 @@ func (c Config) FillDefaults() Config {
 func (c Config) Validate() error {
 	if c.Listen == "" {
 		return fmt.Errorf("не задан адрес прослушивания")
-	}
-
-	if c.Panel.Listen == "" {
-		return fmt.Errorf("не задан адрес панели")
 	}
 
 	if c.TLS.Cert == "" || c.TLS.Key == "" {

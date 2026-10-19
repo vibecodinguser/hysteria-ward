@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -113,11 +114,8 @@ func TestRunServeServesInterface(t *testing.T) {
 	certPath, keyPath := writeCertificate(t, dir)
 	dbPath := filepath.Join(dir, "hysteria-ward.db")
 	logPath := filepath.Join(dir, "panel.log")
-	panelAddr := freeAddr(t)
-
-	seedConfig(t, dbPath, config.Config{
+	panelAddr := seedPanel(t, dbPath, config.Config{
 		Listen:     "127.0.0.1:0",
-		Panel:      config.Panel{Listen: panelAddr},
 		TLS:        config.TLS{Cert: certPath, Key: keyPath},
 		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
 	})
@@ -167,9 +165,8 @@ func TestRunServeRefusesWithoutCertificate(t *testing.T) {
 	dbPath := filepath.Join(dir, "hysteria-ward.db")
 	logPath := filepath.Join(dir, "panel.log")
 
-	seedConfig(t, dbPath, config.Config{
+	seedPanel(t, dbPath, config.Config{
 		Listen:     "127.0.0.1:0",
-		Panel:      config.Panel{Listen: freeAddr(t)},
 		TLS:        config.TLS{Cert: filepath.Join(dir, "нет.pem"), Key: filepath.Join(dir, "нет.key")},
 		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
 	})
@@ -190,11 +187,8 @@ func TestRunServeDebugWithoutCertificate(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "hysteria-ward.db")
 	logPath := filepath.Join(dir, "panel.log")
-	panelAddr := freeAddr(t)
-
-	seedConfig(t, dbPath, config.Config{
+	panelAddr := seedPanel(t, dbPath, config.Config{
 		Listen:     "127.0.0.1:0",
-		Panel:      config.Panel{Listen: panelAddr},
 		TLS:        config.TLS{Cert: filepath.Join(dir, "нет.pem"), Key: filepath.Join(dir, "нет.key")},
 		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
 	})
@@ -245,11 +239,8 @@ func TestRunServeLoginCycle(t *testing.T) {
 	certPath, keyPath := writeCertificate(t, dir)
 	dbPath := filepath.Join(dir, "hysteria-ward.db")
 	logPath := filepath.Join(dir, "panel.log")
-	panelAddr := freeAddr(t)
-
-	seedConfig(t, dbPath, config.Config{
+	panelAddr := seedPanel(t, dbPath, config.Config{
 		Listen:     "127.0.0.1:0",
-		Panel:      config.Panel{Listen: panelAddr},
 		TLS:        config.TLS{Cert: certPath, Key: keyPath},
 		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
 	})
@@ -337,11 +328,8 @@ func TestRunServeKeepsSessionAcrossRestart(t *testing.T) {
 	certPath, keyPath := writeCertificate(t, dir)
 	dbPath := filepath.Join(dir, "hysteria-ward.db")
 	logPath := filepath.Join(dir, "panel.log")
-	panelAddr := freeAddr(t)
-
-	seedConfig(t, dbPath, config.Config{
+	panelAddr := seedPanel(t, dbPath, config.Config{
 		Listen:     "127.0.0.1:0",
-		Panel:      config.Panel{Listen: panelAddr},
 		TLS:        config.TLS{Cert: certPath, Key: keyPath},
 		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
 	})
@@ -378,6 +366,98 @@ func TestRunServeKeepsSessionAcrossRestart(t *testing.T) {
 
 	if status, _, _ := do(t, client, http.MethodGet, base+"/api/status", "", session, nil); status != http.StatusOK {
 		t.Errorf("состояние после перезапуска = %d, ожидался 200: сессия не пережила перезапуск", status)
+	}
+
+	panel.cancel()
+	if code := panel.wait(t); code != 0 {
+		t.Fatalf("Run(serve) = %d, ожидалось 0; stderr: %q", code, panel.stderr.String())
+	}
+}
+
+// TestRunServeSwitchesAccess — публичный доступ включается из интерфейса, не
+// перезапуская панель, и переживает перезапуск.
+//
+// Круг проверяется целиком, потому что решает его не одна функция: панель не
+// открывается с паролем по умолчанию, перевешивает слушатель на ходу, запоминает
+// выбор в базе и встаёт по нему при следующем запуске. По частям то же самое
+// проверяют api и store; здесь важно, что сходится вместе — и что переключение не
+// стоит перезапуска.
+func TestRunServeSwitchesAccess(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := writeCertificate(t, dir)
+	dbPath := filepath.Join(dir, "hysteria-ward.db")
+	logPath := filepath.Join(dir, "panel.log")
+
+	panelAddr := seedPanel(t, dbPath, config.Config{
+		Listen:     "127.0.0.1:0",
+		TLS:        config.TLS{Cert: certPath, Key: keyPath},
+		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
+	})
+	port := portOf(t, panelAddr)
+
+	client := trusting(t, certPath)
+	base := "https://" + panelAddr
+
+	// С паролем по умолчанию панель наружу не открывается: этот пароль знает кто
+	// угодно.
+	panel := serve(t, "--db", dbPath, "--log", logPath)
+	waitForInterface(t, client, panelAddr)
+
+	cookie, csrf := signIn(t, client, base, authn.DefaultName, authn.DefaultPassword)
+
+	status, _, body := do(t, client, http.MethodPost, base+"/api/panel/access", `{"access":"public"}`, cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if status != http.StatusConflict {
+		t.Fatalf("публичный доступ с паролем по умолчанию = %d (%s), ожидался 409", status, body)
+	}
+
+	panel.cancel()
+	if code := panel.wait(t); code != 0 {
+		t.Fatalf("Run(serve) = %d, ожидалось 0; stderr: %q", code, panel.stderr.String())
+	}
+
+	// База освободилась — пароль можно сменить.
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"passwd", "--db", dbPath},
+		strings.NewReader("новый пароль\n"), &stdout, &stderr); code != 0 {
+		t.Fatalf("Run(passwd) = %d; stderr: %q", code, stderr.String())
+	}
+
+	panel = serve(t, "--db", dbPath, "--log", logPath)
+	waitForInterface(t, client, panelAddr)
+
+	cookie, csrf = signIn(t, client, base, authn.DefaultName, "новый пароль")
+
+	status, _, body = do(t, client, http.MethodPost, base+"/api/panel/access", `{"access":"public"}`, cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if status != http.StatusOK {
+		t.Fatalf("публичный доступ = %d (%s), ожидался 200", status, body)
+	}
+
+	if !strings.Contains(body, `"access":"public"`) || !strings.Contains(body, `"addr":"0.0.0.0:`+strconv.Itoa(port)) {
+		t.Errorf("ответ на переключение = %s", body)
+	}
+
+	waitForLog(t, logPath, "панель открыта наружу")
+
+	panel.cancel()
+	if code := panel.wait(t); code != 0 {
+		t.Fatalf("Run(serve) = %d, ожидалось 0; stderr: %q", code, panel.stderr.String())
+	}
+
+	// Выбор пережил перезапуск: панель встала на все интерфейсы, а не на петлю.
+	panel = serve(t, "--db", dbPath, "--log", logPath)
+	waitForLog(t, logPath, "access=public")
+	waitForInterface(t, client, panelAddr)
+
+	cookie, _ = signIn(t, client, base, authn.DefaultName, "новый пароль")
+
+	status, _, body = do(t, client, http.MethodGet, base+"/api/panel", "", cookie, nil)
+	if status != http.StatusOK {
+		t.Fatalf("настройки панели после перезапуска = %d, ожидался 200", status)
+	}
+	if !strings.Contains(body, `"access":"public"`) {
+		t.Errorf("после перезапуска панель снова спрятана: %s", body)
 	}
 
 	panel.cancel()
@@ -477,11 +557,8 @@ func TestRunPasswdNeedsFreeDatabase(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "hysteria-ward.db")
 	logPath := filepath.Join(dir, "panel.log")
-	panelAddr := freeAddr(t)
-
-	seedConfig(t, dbPath, config.Config{
+	panelAddr := seedPanel(t, dbPath, config.Config{
 		Listen:     "127.0.0.1:0",
-		Panel:      config.Panel{Listen: panelAddr},
 		Masquerade: config.Masquerade{Mode: config.MasqueradeOff},
 	})
 
@@ -662,6 +739,35 @@ func trusting(t *testing.T, certPath string) *http.Client {
 	}
 }
 
+// signIn входит в панель и возвращает cookie сессии и csrf-токен: без второго
+// изменяющий запрос не пройдёт.
+func signIn(t *testing.T, client *http.Client, base, name, password string) (*http.Cookie, string) {
+	t.Helper()
+
+	status, resp, body := do(t, client, http.MethodPost, base+"/api/login",
+		`{"name":"`+name+`","password":"`+password+`"}`, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("вход = %d (%s), ожидался 200", status, body)
+	}
+
+	var entered struct {
+		CSRF string `json:"csrf"`
+	}
+	if err := json.Unmarshal([]byte(body), &entered); err != nil {
+		t.Fatalf("ответ о входе не разобран: %v", err)
+	}
+
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == "hysteria_ward_session" {
+			return cookie, entered.CSRF
+		}
+	}
+
+	t.Fatal("панель не выдала cookie сессии")
+
+	return nil, ""
+}
+
 // freeAddr занимает и сразу освобождает порт: тесту нужен адрес, который панель
 // сможет занять сама.
 func freeAddr(t *testing.T) string {
@@ -676,10 +782,16 @@ func freeAddr(t *testing.T) string {
 	return listener.Addr().String()
 }
 
-// seedConfig кладёт конфигурацию в базу до запуска панели — так же, как это
-// сделает установщик на чистом сервере.
-func seedConfig(t *testing.T, dbPath string, cfg config.Config) {
+// seedPanel кладёт в базу конфигурацию сервера и настройки панели на свободном
+// порту — так же, как это сделает установщик на чистом сервере, — и возвращает
+// адрес, по которому панель будет доступна.
+//
+// Наружу панель при этом не выставлена: в настройках режим туннеля, то есть
+// петля.
+func seedPanel(t *testing.T, dbPath string, cfg config.Config) string {
 	t.Helper()
+
+	port := portOf(t, freeAddr(t))
 
 	s, err := store.Open(dbPath)
 	if err != nil {
@@ -690,6 +802,30 @@ func seedConfig(t *testing.T, dbPath string, cfg config.Config) {
 	if err := s.SaveConfig(cfg); err != nil {
 		t.Fatalf("SaveConfig() = %v", err)
 	}
+
+	settings := store.PanelSettings{Access: store.AccessTunnel, Port: port}
+	if err := s.SavePanelSettings(settings); err != nil {
+		t.Fatalf("SavePanelSettings() = %v", err)
+	}
+
+	return net.JoinHostPort(settings.Access.Host(), strconv.Itoa(port))
+}
+
+// portOf достаёт номер порта из адреса.
+func portOf(t *testing.T, addr string) int {
+	t.Helper()
+
+	_, raw, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("адрес %q не разобран: %v", addr, err)
+	}
+
+	number, err := strconv.Atoi(raw)
+	if err != nil {
+		t.Fatalf("порт %q не разобран: %v", raw, err)
+	}
+
+	return number
 }
 
 // readLog читает журнал панели.

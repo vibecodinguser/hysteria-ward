@@ -484,6 +484,58 @@ func TestEnsureCredentialReportsChangedPassword(t *testing.T) {
 	}
 }
 
+// TestDefaultPasswordInUse — по этому признаку панель решает, выставлять ли себя
+// наружу, поэтому проверяются не только оба ответа, но и смена имени.
+func TestDefaultPasswordInUse(t *testing.T) {
+	s, _ := newService(t, newMemoryStorage(t))
+
+	inUse, err := s.DefaultPasswordInUse()
+	if err != nil {
+		t.Fatalf("DefaultPasswordInUse() = %v", err)
+	}
+	if inUse {
+		t.Error("свой пароль приняли за пароль по умолчанию")
+	}
+
+	hash, err := Hash(DefaultPassword)
+	if err != nil {
+		t.Fatalf("Hash() = %v", err)
+	}
+	if err := s.SetCredential(Credential{Name: DefaultName, Hash: hash}); err != nil {
+		t.Fatalf("SetCredential() = %v", err)
+	}
+
+	inUse, err = s.DefaultPasswordInUse()
+	if err != nil {
+		t.Fatalf("DefaultPasswordInUse() = %v", err)
+	}
+	if !inUse {
+		t.Error("пароль по умолчанию не опознан")
+	}
+
+	if err := s.SetCredential(Credential{Name: "хозяин", Hash: hash}); err != nil {
+		t.Fatalf("SetCredential() = %v", err)
+	}
+
+	inUse, err = s.DefaultPasswordInUse()
+	if err != nil {
+		t.Fatalf("DefaultPasswordInUse() = %v", err)
+	}
+	if inUse {
+		t.Error("пароль по умолчанию с другим именем приняли за действующий")
+	}
+}
+
+// TestDefaultPasswordInUseWithoutCredential — войти некому, и «пароль по умолчанию
+// не в силе» было бы здесь неправдой.
+func TestDefaultPasswordInUseWithoutCredential(t *testing.T) {
+	s, _ := newService(t, &memoryStorage{sessions: make(map[string]Session)})
+
+	if _, err := s.DefaultPasswordInUse(); err == nil {
+		t.Error("DefaultPasswordInUse() без учётных данных прошёл, ожидалась ошибка")
+	}
+}
+
 // TestNewPrunesStaleSessions — перезапуск панели не тащит за собой брошенные
 // сессии.
 func TestNewPrunesStaleSessions(t *testing.T) {
