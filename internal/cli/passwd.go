@@ -1,14 +1,12 @@
 package cli
 
 import (
-	"bufio"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"strings"
 
 	"golang.org/x/term"
 
@@ -90,17 +88,7 @@ func askPassword(stdin io.Reader, stderr io.Writer) (string, error) {
 		return askFromTerminal(file, stderr)
 	}
 
-	line, err := bufio.NewReader(stdin).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("чтение пароля: %w", err)
-	}
-
-	password := strings.TrimRight(line, "\r\n")
-	if password == "" {
-		return "", errors.New("пустой пароль")
-	}
-
-	return password, nil
+	return readPasswordLine(stdin)
 }
 
 // askFromTerminal читает пароль дважды, не показывая набранное.

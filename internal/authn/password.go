@@ -21,7 +21,26 @@ const (
 
 	argonKeyLen  = 32
 	argonSaltLen = 16
+
+	// generatedPasswordBytes — сколько случайных байт в пароле, который панель
+	// придумывает сама. 18 байт дают 24 символа base64url: перебрать такое не по
+	// силам, а переписать с экрана — не трудно.
+	generatedPasswordBytes = 18
 )
+
+// GeneratePassword придумывает пароль администратора.
+//
+// Символы — base64url: они переживают копирование, не требуют экранирования и не
+// содержат похожих друг на друга пар. Пароль возвращается в открытом виде только
+// тому, кто его печатает один раз; в базе остаётся Argon2id-хеш.
+func GeneratePassword() (string, error) {
+	raw := make([]byte, generatedPasswordBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("пароль: %w", err)
+	}
+
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
 
 // Hash считает Argon2id-хеш пароля.
 //

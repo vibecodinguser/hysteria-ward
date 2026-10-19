@@ -65,6 +65,38 @@ func TestHashFormat(t *testing.T) {
 	}
 }
 
+// TestGeneratePassword — придуманный пароль не пустой, не повторяется и годится
+// для входа. 24 символа base64url: перебрать нельзя, скопировать можно.
+func TestGeneratePassword(t *testing.T) {
+	first, err := authn.GeneratePassword()
+	if err != nil {
+		t.Fatalf("GeneratePassword() = %v", err)
+	}
+	second, err := authn.GeneratePassword()
+	if err != nil {
+		t.Fatalf("GeneratePassword() = %v", err)
+	}
+
+	if len(first) != 24 {
+		t.Errorf("длина пароля = %d, ожидалось 24", len(first))
+	}
+	if first == second {
+		t.Error("два сгенерированных пароля совпали")
+	}
+
+	encoded, err := authn.Hash(first)
+	if err != nil {
+		t.Fatalf("Hash() = %v", err)
+	}
+	matched, err := authn.Verify(encoded, first)
+	if err != nil {
+		t.Fatalf("Verify() = %v", err)
+	}
+	if !matched {
+		t.Error("сгенерированный пароль не подошёл к своему хешу")
+	}
+}
+
 // TestVerifyRejectsBrokenHash — испорченный хеш отличается от неверного пароля:
 // это поломка базы, и о ней нужно сказать, а не молча никого не пустить.
 func TestVerifyRejectsBrokenHash(t *testing.T) {
