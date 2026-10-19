@@ -187,6 +187,19 @@ func TestOnlineState(t *testing.T) {
 	if registry.IsOnline(user.ID) {
 		t.Error("отключение не запомнено")
 	}
+
+	// Удалённого пользователя список подключённых не помнит: иначе запись о нём
+	// жила бы до перезапуска панели.
+	registry.Online(user.ID, true)
+	if err := s.DeleteUser(user.ID); err != nil {
+		t.Fatalf("DeleteUser() = %v", err)
+	}
+	if err := registry.Reload(); err != nil {
+		t.Fatalf("Reload() = %v", err)
+	}
+	if registry.IsOnline(user.ID) {
+		t.Error("удалённый пользователь остался в списке подключённых")
+	}
 }
 
 // TestPasswordInUse — два пользователя с одним паролем означали бы, что сервер не

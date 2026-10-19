@@ -57,6 +57,14 @@ func (r *Registry) Reload() error {
 
 	r.mu.Lock()
 	r.users = users
+
+	// Подключённых удалённых тоже забываем: в списке их уже нет, а запись о них
+	// осталась бы до перезапуска панели.
+	for id := range r.online {
+		if _, ok := users[id]; !ok {
+			delete(r.online, id)
+		}
+	}
 	r.mu.Unlock()
 
 	return nil
