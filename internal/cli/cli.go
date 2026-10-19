@@ -31,6 +31,7 @@ var usage = fmt.Sprintf(`%[1]s — панель управления серве�
   %[1]s serve [флаги]
   %[1]s passwd [флаги]
   %[1]s setup [флаги]
+  %[1]s config [флаги]
   %[1]s [флаг]
 
 Флаги:
@@ -61,6 +62,11 @@ var usage = fmt.Sprintf(`%[1]s — панель управления серве�
   --generate-password сгенерировать пароль и показать его один раз
   --check             только проверить ответы, ничего не записывать
   --cert, --key       пути сертификата и ключа
+
+Флаги config:
+  --db      файл базы (по умолчанию %[2]s)
+  --check   только проверить настройки, ничего не записывать (по умолчанию)
+  --repair  дополнить недостающие настройки умолчаниями и записать их
 
 Пароль панель спрашивает у того, кто её ставит: с терминала — дважды и не показывая
 набранное, из трубы — одной строкой. Панель перед сменой пароля нужно остановить:
@@ -100,6 +106,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 
 	case "setup":
 		return runSetup(args[1:], stdin, stdout, stderr)
+
+	case "config":
+		return runConfig(args[1:], stdout, stderr)
 
 	case "--version":
 		fmt.Fprintln(stdout, build.Current().String())

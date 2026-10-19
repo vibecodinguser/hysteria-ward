@@ -57,6 +57,18 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
+// OpenReadOnly открывает базу только для чтения и не трогает схему. Работающей
+// панели это не мешает только тогда, когда она уже остановлена: bbolt держит
+// файл на исключительной блокировке, пока база открыта на запись.
+func OpenReadOnly(path string) (*Store, error) {
+	db, err := bolt.Open(path, 0o600, &bolt.Options{ReadOnly: true, Timeout: time.Second})
+	if err != nil {
+		return nil, fmt.Errorf("открытие базы %q только для чтения: %w", path, err)
+	}
+
+	return &Store{db: db, path: path}, nil
+}
+
 // Close закрывает базу.
 func (s *Store) Close() error {
 	return s.db.Close()
