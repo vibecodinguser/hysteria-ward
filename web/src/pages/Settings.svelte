@@ -16,9 +16,17 @@
 	// повод перезапускать сервер.
 	let domain = $state('')
 	let serverLoading = $state(true)
+	let serverLoaded = $state(false)
 	let serverFailure = $state(null)
 	let serverSaving = $state(false)
 	let serverSaved = $state(false)
+
+	// Masquerade: подставной ответ посторонним запросам. Это часть конфигурации
+	// ядра, поэтому правка вступает в силу только по «Применить».
+	let masquerade = $state({ mode: 'off', file: '', proxy: '' })
+	let masqueradeApplying = $state(false)
+	let masqueradeApplied = $state(false)
+	let masqueradeFailure = $state(null)
 
 	load()
 	loadServer()
@@ -79,7 +87,10 @@
 				return
 			}
 
-			domain = (await answer.json()).domain
+			const settings = await answer.json()
+			domain = settings.domain
+			masquerade = settings.masquerade
+			serverLoaded = true
 		} catch {
 			serverFailure = m.settings_server_failed()
 		} finally {
@@ -127,6 +138,40 @@
 			return error || null
 		} catch {
 			return null
+		}
+	}
+
+	async function applyMasquerade() {
+		// Двойной щелчок не должен перезапускать ядро дважды.
+		if (masqueradeApplying) {
+			return
+		}
+
+		masqueradeApplying = true
+		masqueradeFailure = null
+		masqueradeApplied = false
+
+		try {
+			const answer = await apiFetch('/api/server/apply', {
+				method: 'POST',
+				body: { masquerade }
+			})
+
+			if (!answer.ok) {
+				// Причину называет панель: только она знает, нашёлся ли каталог и
+				// поднялось ли ядро.
+				masqueradeFailure = (await reasonOf(answer)) ?? m.settings_masquerade_failed()
+				return
+			}
+
+			// Панель возвращает записанное: показывать введённое как есть, когда
+			// база хранит уже другое, — обманывать.
+			masquerade = (await answer.json()).masquerade
+			masqueradeApplied = true
+		} catch {
+			masqueradeFailure = m.session_unreachable()
+		} finally {
+			masqueradeApplying = false
 		}
 	}
 </script>
@@ -207,7 +252,7 @@
 
 	{#if serverLoading}
 		<p class="mt-2 text-sm text-slate-400">{m.settings_panel_loading()}</p>
-	{:else}
+	{:else if serverLoaded}
 		<p class="mt-2 text-sm text-slate-400">{m.settings_server_hint()}</p>
 
 		{#if domain === ''}
@@ -244,5 +289,75 @@
 		{#if serverFailure}
 			<p class="mt-3 text-sm text-rose-400" role="alert">{serverFailure}</p>
 		{/if}
+
+		<div class="mt-6 border-t border-slate-800 pt-6">
+			<h3 class="font-semibold">{m.settings_masquerade_title()}</h3>
+			<p class="mt-2 text-sm text-slate-400">{m.settings_masquerade_hint()}</p>
+
+			<form
+				class="mt-4 flex flex-wrap items-end gap-3"
+				onsubmit={(event) => {
+					event.preventDefault()
+					applyMasquerade()
+				}}
+			>
+				<label class="flex flex-col gap-1 text-sm text-slate-300">
+					<span>{m.settings_masquerade_mode()}</span>
+					<select
+						bind:value={masquerade.mode}
+						class="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+					>
+						<option value="off">{m.settings_masquerade_off()}</option>
+						<option value="file">{m.settings_masquerade_file()}</option>
+						<option value="proxy">{m.settings_masquerade_proxy()}</option>
+					</select>
+				</label>
+
+				{#if masquerade.mode === 'file'}
+					<label class="flex min-w-56 flex-1 flex-col gap-1 text-sm text-slate-300">
+						<span>{m.settings_masquerade_file_path()}</span>
+						<input
+							type="text"
+							bind:value={masquerade.file}
+							placeholder={m.settings_masquerade_file_placeholder()}
+							autocomplete="off"
+							class="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600"
+						/>
+					</label>
+				{:else if masquerade.mode === 'proxy'}
+					<label class="flex min-w-56 flex-1 flex-col gap-1 text-sm text-slate-300">
+						<span>{m.settings_masquerade_proxy_url()}</span>
+						<input
+							type="url"
+							bind:value={masquerade.proxy}
+							placeholder={m.settings_masquerade_proxy_placeholder()}
+							autocomplete="off"
+							class="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600"
+						/>
+					</label>
+				{/if}
+
+				<button
+					type="submit"
+					disabled={masqueradeApplying}
+					class="rounded bg-slate-100 px-3 py-2 text-sm font-medium text-slate-900 transition-colors hover:bg-white disabled:opacity-60"
+				>
+					{masqueradeApplying ? m.settings_masquerade_applying() : m.settings_masquerade_apply()}
+				</button>
+			</form>
+
+			<p class="mt-3 text-xs text-amber-400/80">{m.settings_masquerade_restart()}</p>
+
+			{#if masqueradeApplied}
+				<p class="mt-3 text-sm text-emerald-400" role="status">{m.settings_masquerade_applied()}</p>
+			{/if}
+			{#if masqueradeFailure}
+				<p class="mt-3 text-sm text-rose-400" role="alert">{masqueradeFailure}</p>
+			{/if}
+		</div>
+	{:else}
+		<p class="mt-2 text-sm text-rose-400" role="alert">
+			{serverFailure ?? m.settings_server_failed()}
+		</p>
 	{/if}
 </section>
