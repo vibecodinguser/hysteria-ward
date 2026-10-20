@@ -7,6 +7,7 @@
 package users
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -15,6 +16,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
 )
@@ -22,6 +24,23 @@ import (
 // passwordBytes — сколько случайных байт в пароле клиента. 18 байт дают 24
 // символа base64url: перебрать такое не по силам, а скопировать не трудно.
 const passwordBytes = 18
+
+const (
+	// quotaFlushEvery — как часто расход квот доходит до базы. Горячий путь
+	// копит его в памяти, а запись идёт по часам, как и история трафика.
+	quotaFlushEvery = 5 * time.Second
+
+	// quotaPeriodCheckEvery — как часто проверяется граница месяца. Квота
+	// месячная, и расход должен обнулиться, даже если панель работает без
+	// перезапуска.
+	quotaPeriodCheckEvery = time.Minute
+)
+
+// quotaState — расход одного пользователя за текущий месяц.
+type quotaState struct {
+	used  uint64
+	since time.Time
+}
 
 // Registry — пользователи в памяти: кто проходит авторизацию и кому можно
 // отправлять трафик.
@@ -33,11 +52,33 @@ type Registry struct {
 	mu     sync.RWMutex
 	users  map[string]store.User
 	online map[string]bool
+
+	// quota — расход за текущий месяц, отдельно от записи пользователя. Правка
+	// пользователя не должна обнулять счётчик, а горячий путь не должен ходить
+	// в базу на каждый пакет.
+	//
+	// quotaMu отдельный от mu: проверка квоты меняет счётчик на каждом пакете и
+	// не должна запирать чтение списка пользователей. quotaWrite сериализует
+	// запись в базу: сброс квоты не должен проиграть фоновому сохранению старого
+	// расхода.
+	quotaMu    sync.Mutex
+	quotaWrite sync.Mutex
+	quota      map[string]quotaState
+	dirtyQuota map[string]bool
+
+	// now подменяется тестом, которому нужна граница месяца.
+	now func() time.Time
 }
 
-// New читает пользователей из базы.
+// New читает пользователей и расход квот из базы.
 func New(db *store.Store) (*Registry, error) {
-	r := &Registry{db: db, online: make(map[string]bool)}
+	r := &Registry{
+		db:         db,
+		online:     make(map[string]bool),
+		quota:      make(map[string]quotaState),
+		dirtyQuota: make(map[string]bool),
+		now:        time.Now,
+	}
 	if err := r.Reload(); err != nil {
 		return nil, err
 	}
@@ -47,8 +88,17 @@ func New(db *store.Store) (*Registry, error) {
 
 // Reload перечитывает пользователей из базы. Вызывается после каждой правки:
 // удалённый пользователь должен перестать пускаться и начать рваться.
+//
+// Расход квот при этом не сбрасывается: он живёт отдельно от записи и меняется
+// на каждом пакете. Из базы берутся только записи пользователей, которых ещё не
+// было в памяти.
 func (r *Registry) Reload() error {
 	list, err := r.db.Users()
+	if err != nil {
+		return err
+	}
+
+	usages, err := r.db.QuotaUsages()
 	if err != nil {
 		return err
 	}
@@ -70,6 +120,43 @@ func (r *Registry) Reload() error {
 	}
 	r.mu.Unlock()
 
+	now := r.clock()
+	start := monthStart(now)
+
+	r.quotaMu.Lock()
+	defer r.quotaMu.Unlock()
+
+	quota := make(map[string]quotaState, len(users))
+	for id := range users {
+		state, ok := r.quota[id]
+		if !ok {
+			if saved, found := usages[id]; found {
+				state = quotaState{used: saved.Used, since: saved.Since}
+			} else {
+				state.since = start
+			}
+		}
+
+		if state.since.IsZero() {
+			state.since = start
+		}
+		if state.since.Before(start) {
+			state.used = 0
+			state.since = start
+			r.dirtyQuota[id] = true
+		}
+
+		quota[id] = state
+	}
+
+	r.quota = quota
+
+	for id := range r.dirtyQuota {
+		if _, ok := users[id]; !ok {
+			delete(r.dirtyQuota, id)
+		}
+	}
+
 	return nil
 }
 
@@ -86,9 +173,8 @@ const authSeparator = ":"
 // старое соединение перестаёт проходить проверку — его рвёт следующий пакет.
 func (r *Registry) Auth(password string) (string, bool) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	for id, user := range r.users {
+	var matched *store.User
+	for _, user := range r.users {
 		if !user.Enabled {
 			continue
 		}
@@ -96,11 +182,27 @@ func (r *Registry) Auth(password string) (string, bool) {
 		// Пароли сравниваются за одинаковое время: иначе по времени ответа
 		// можно было бы угадывать пароль по символу.
 		if subtle.ConstantTimeCompare([]byte(user.Password), []byte(password)) == 1 {
-			return connectionID(id, user.Password), true
+			user := user
+			matched = &user
+
+			break
 		}
 	}
+	r.mu.RUnlock()
 
-	return "", false
+	if matched == nil {
+		return "", false
+	}
+
+	r.quotaMu.Lock()
+	defer r.quotaMu.Unlock()
+
+	r.rollQuotaLocked(matched.ID, r.clock())
+	if !r.allowQuotaLocked(matched.ID, matched.QuotaBytes, 0) {
+		return "", false
+	}
+
+	return connectionID(matched.ID, matched.Password), true
 }
 
 // Resolve называет пользователя по строке соединения. Строка годится, только пока
@@ -132,13 +234,155 @@ func (r *Registry) resolveLocked(id string) (string, bool) {
 }
 
 // Traffic сообщает ядру, продолжать ли соединение, и называет пользователя для
-// статистики. false рвёт соединение — так выключение, удаление и смена пароля
-// достают до уже подключённых: следующий пакет закрывает соединение.
-func (r *Registry) Traffic(id string, _, _ uint64) (string, bool) {
+// статистики. false рвёт соединение — так выключение, удаление, смена пароля и
+// исчерпанная квота достают до уже подключённых: следующий пакет закрывает
+// соединение.
+//
+// Расход квоты копится здесь же, в памяти: запись в базу идёт по часам, а не на
+// каждый пакет.
+func (r *Registry) Traffic(id string, tx, rx uint64) (string, bool) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	userID, ok := r.resolveLocked(id)
+	if !ok {
+		r.mu.RUnlock()
+		return "", false
+	}
+	user := r.users[userID]
+	r.mu.RUnlock()
 
-	return r.resolveLocked(id)
+	add := tx
+	if ^uint64(0)-add < rx {
+		add = ^uint64(0)
+	} else {
+		add += rx
+	}
+
+	r.quotaMu.Lock()
+	defer r.quotaMu.Unlock()
+
+	if !r.allowQuotaLocked(userID, user.QuotaBytes, add) {
+		return "", false
+	}
+
+	return userID, true
+}
+
+// Quota сообщает расход, предел и начало текущего периода. Для пользователя без
+// записи расхода возвращается пустой месяц: это нормальное состояние после
+// заведения.
+func (r *Registry) Quota(id string) (used, limit uint64, since time.Time) {
+	r.mu.RLock()
+	user, ok := r.users[id]
+	r.mu.RUnlock()
+
+	if !ok {
+		return 0, 0, monthStart(r.clock())
+	}
+
+	now := r.clock()
+
+	r.quotaMu.Lock()
+	defer r.quotaMu.Unlock()
+
+	state := r.rollQuotaLocked(id, now)
+	return state.used, user.QuotaBytes, state.since
+}
+
+// ResetQuota обнуляет расход пользователя и сразу пишет это в базу: сброс — не
+// горячий путь, и терять его при падении незачем.
+func (r *Registry) ResetQuota(id string) error {
+	r.mu.RLock()
+	_, ok := r.users[id]
+	r.mu.RUnlock()
+	if !ok {
+		return store.ErrUserMissing
+	}
+
+	since := monthStart(r.clock())
+
+	r.quotaWrite.Lock()
+	defer r.quotaWrite.Unlock()
+
+	r.quotaMu.Lock()
+	r.quota[id] = quotaState{since: since}
+	delete(r.dirtyQuota, id)
+	r.quotaMu.Unlock()
+
+	return r.db.ResetQuota(id, since)
+}
+
+// FlushQuotas записывает накопленный расход в базу. Повторный вызов безопасен:
+// записываются только изменившиеся записи.
+func (r *Registry) FlushQuotas() error {
+	r.quotaWrite.Lock()
+	defer r.quotaWrite.Unlock()
+
+	r.quotaMu.Lock()
+	saved := make(map[string]quotaState, len(r.dirtyQuota))
+	for id := range r.dirtyQuota {
+		saved[id] = r.quota[id]
+	}
+	r.quotaMu.Unlock()
+
+	if len(saved) == 0 {
+		return nil
+	}
+
+	usages := make(map[string]store.QuotaUsage, len(saved))
+	for id, state := range saved {
+		usages[id] = store.QuotaUsage{Used: state.used, Since: state.since}
+	}
+
+	if err := r.db.SaveQuotaUsages(usages); err != nil {
+		return err
+	}
+
+	// Пока шла запись, горячий путь мог прибавить ещё байты. Снимаем отметку
+	// только с тех записей, которые не изменились: иначе прирост потерялся бы.
+	r.quotaMu.Lock()
+	for id, state := range saved {
+		if r.quota[id] == state {
+			delete(r.dirtyQuota, id)
+		}
+	}
+	r.quotaMu.Unlock()
+
+	return nil
+}
+
+// RollQuotas обнуляет расход, если начался новый месяц. Вызывается по часам и
+// при чтении: панель может работать дольше месяца без перезапуска.
+func (r *Registry) RollQuotas() {
+	now := r.clock()
+
+	r.quotaMu.Lock()
+	defer r.quotaMu.Unlock()
+
+	r.rollAllQuotasLocked(now)
+}
+
+// Run ведёт часы квот: пишет расход в базу и переходит на новый месяц.
+func (r *Registry) Run(ctx context.Context) {
+	flush := time.NewTicker(quotaFlushEvery)
+	period := time.NewTicker(quotaPeriodCheckEvery)
+
+	defer flush.Stop()
+	defer period.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			_ = r.FlushQuotas()
+			return
+
+		case <-flush.C:
+			_ = r.FlushQuotas()
+
+		case <-period.C:
+			r.RollQuotas()
+			_ = r.FlushQuotas()
+		}
+	}
 }
 
 // Online запоминает, подключён ли пользователь: интерфейс показывает это в
@@ -191,6 +435,99 @@ func (r *Registry) PasswordInUse(password, exceptID string) bool {
 	}
 
 	return false
+}
+
+// clock возвращает текущее время. Отдельная функция, чтобы тест мог подменить
+// границу месяца, не трогая системные часы.
+func (r *Registry) clock() time.Time {
+	if r.now == nil {
+		return time.Now()
+	}
+
+	return r.now()
+}
+
+// monthStart — начало месяца по UTC. Квота месячная, и граница не должна
+// зависеть от часового пояса сервера.
+func monthStart(t time.Time) time.Time {
+	t = t.UTC()
+
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+// rollQuotaLocked переводит запись на текущий месяц, если она отстала.
+func (r *Registry) rollQuotaLocked(id string, now time.Time) quotaState {
+	state, ok := r.quota[id]
+	if !ok {
+		state.since = monthStart(now)
+	}
+
+	start := monthStart(now)
+	if state.since.IsZero() {
+		state.since = start
+	}
+	if state.since.Before(start) {
+		state.used = 0
+		state.since = start
+		r.dirtyQuota[id] = true
+	}
+
+	r.quota[id] = state
+
+	return state
+}
+
+// rollAllQuotasLocked переводит все записи на текущий месяц.
+func (r *Registry) rollAllQuotasLocked(now time.Time) {
+	for id := range r.quota {
+		r.rollQuotaLocked(id, now)
+	}
+}
+
+// allowQuotaLocked прибавляет add к расходу и сообщает, можно ли пропустить
+// трафик. При исчерпании расход доводится до предела: остаток пакета всё равно
+// не пройдёт, а показать «ровно предел» честнее, чем «предел минус пакет».
+//
+// Границу месяца здесь не проверяем: это делает Run раз в минуту, а на горячем
+// пути лишний time.Now на каждый пакет не нужен.
+func (r *Registry) allowQuotaLocked(id string, limit, add uint64) bool {
+	state, ok := r.quota[id]
+	if !ok {
+		state.since = monthStart(r.clock())
+	}
+
+	if limit == 0 {
+		if ^uint64(0)-state.used < add {
+			state.used = ^uint64(0)
+		} else {
+			state.used += add
+		}
+		r.quota[id] = state
+		r.dirtyQuota[id] = true
+
+		return true
+	}
+
+	if state.used >= limit {
+		return false
+	}
+
+	remaining := limit - state.used
+	if add > remaining {
+		state.used = limit
+		r.quota[id] = state
+		r.dirtyQuota[id] = true
+
+		return false
+	}
+
+	state.used += add
+	r.quota[id] = state
+	if add > 0 {
+		r.dirtyQuota[id] = true
+	}
+
+	return true
 }
 
 // connectionID собирает строку соединения из пользователя и его пароля.

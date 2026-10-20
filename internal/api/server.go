@@ -16,6 +16,10 @@ type serverAnswer struct {
 
 	// Masquerade — чем сервер отвечает постороннему запросу.
 	Masquerade config.Masquerade `json:"masquerade"`
+
+	// Bandwidth — глобальные пределы скорости в байтах в секунду. Ноль — без
+	// ограничения; интерфейс показывает их в Мбит/с.
+	Bandwidth config.Bandwidth `json:"bandwidth"`
 }
 
 // handleServer отдаёт настройки сервера: домен и masquerade.
@@ -74,8 +78,8 @@ func (s *Server) handleSetServer(w http.ResponseWriter, r *http.Request) {
 	s.answerJSON(w, http.StatusOK, answer)
 }
 
-// handleApplyServer запоминает masquerade и применяет конфигурацию: ядро
-// перезапускается, активные соединения клиентов обрываются.
+// handleApplyServer запоминает masquerade и пределы скорости, затем применяет
+// конфигурацию: ядро перезапускается, активные соединения клиентов обрываются.
 //
 // Сначала запись, потом применение: если ядро не поднимется, правка останется в
 // базе черновиком, и администратор сможет её починить. Обратный порядок оставил
@@ -83,6 +87,7 @@ func (s *Server) handleSetServer(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleApplyServer(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Masquerade *config.Masquerade `json:"masquerade"`
+		Bandwidth  *config.Bandwidth  `json:"bandwidth"`
 	}
 
 	if err := decodeBody(w, r, &request); err != nil {
@@ -91,16 +96,26 @@ func (s *Server) handleApplyServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if request.Masquerade == nil {
-		s.answerError(w, http.StatusBadRequest, "не задан режим masquerade")
+	if request.Masquerade == nil && request.Bandwidth == nil {
+		s.answerError(w, http.StatusBadRequest, "не заданы настройки для применения")
 
 		return
 	}
 
-	if err := request.Masquerade.Validate(); err != nil {
-		s.answerError(w, http.StatusBadRequest, err.Error())
+	if request.Masquerade != nil {
+		if err := request.Masquerade.Validate(); err != nil {
+			s.answerError(w, http.StatusBadRequest, err.Error())
 
-		return
+			return
+		}
+	}
+
+	if request.Bandwidth != nil {
+		if err := request.Bandwidth.Validate(); err != nil {
+			s.answerError(w, http.StatusBadRequest, err.Error())
+
+			return
+		}
 	}
 
 	cfg, err := s.store.Config()
@@ -110,7 +125,13 @@ func (s *Server) handleApplyServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg.Masquerade = *request.Masquerade
+	if request.Masquerade != nil {
+		cfg.Masquerade = *request.Masquerade
+	}
+	if request.Bandwidth != nil {
+		cfg.Bandwidth = *request.Bandwidth
+	}
+
 	if err := s.store.SaveConfig(cfg); err != nil {
 		s.answerStoreError(w, "запись конфигурации", err)
 
@@ -126,7 +147,11 @@ func (s *Server) handleApplyServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("masquerade применён", "mode", string(request.Masquerade.Mode))
+	s.logger.Info("настройки сервера применены",
+		"masquerade", string(cfg.Masquerade.Mode),
+		"bandwidth_up", cfg.Bandwidth.Up,
+		"bandwidth_down", cfg.Bandwidth.Down,
+	)
 
 	answer, err := s.serverSettings()
 	if err != nil {
@@ -150,5 +175,5 @@ func (s *Server) serverSettings() (serverAnswer, error) {
 		return serverAnswer{}, err
 	}
 
-	return serverAnswer{Domain: domain, Masquerade: cfg.Masquerade}, nil
+	return serverAnswer{Domain: domain, Masquerade: cfg.Masquerade, Bandwidth: cfg.Bandwidth}, nil
 }

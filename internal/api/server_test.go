@@ -110,6 +110,53 @@ func TestMasqueradeIsSavedAndApplied(t *testing.T) {
 	}
 }
 
+// TestBandwidthIsSavedAndApplied — глобальные пределы сохраняются и доходят до
+// ядра тем же применением, что и masquerade.
+func TestBandwidthIsSavedAndApplied(t *testing.T) {
+	opts := options(t)
+
+	applied := 0
+	opts.Apply = func() error {
+		applied++
+
+		return nil
+	}
+
+	s := start(t, opts)
+	cookie, csrf := enter(t, s, "admin", "admin")
+
+	resp := do(t, s, http.MethodPost, "/api/server/apply",
+		`{"bandwidth":{"up":65536,"down":131072}}`, cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("применение скорости: код %d, ожидался 200", resp.StatusCode)
+	}
+
+	answer := decode[serverJSON](t, resp)
+	if answer.Bandwidth.Up != 65536 || answer.Bandwidth.Down != 131072 {
+		t.Errorf("скорость = %+v, ожидались 65536/131072", answer.Bandwidth)
+	}
+	if applied != 1 {
+		t.Errorf("ядро перезапущено %d раз, ожидался 1", applied)
+	}
+
+	if got := serverOf(t, s, cookie); got.Bandwidth != answer.Bandwidth {
+		t.Errorf("после перечитывания скорость = %+v, ожидалась %+v", got.Bandwidth, answer.Bandwidth)
+	}
+
+	// Слишком маленький ненулевой предел ядро отвергнет; панель ловит это до
+	// базы и до остановки работающего сервера.
+	resp = do(t, s, http.MethodPost, "/api/server/apply",
+		`{"bandwidth":{"up":1}}`, cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("слишком маленькая скорость: код %d, ожидался 400", resp.StatusCode)
+	}
+	if applied != 1 {
+		t.Errorf("негодная скорость дошла до ядра: применений %d, ожидалось 1", applied)
+	}
+}
+
 // TestMasqueradeIsValidatedBeforeApply — негодный режим не доходит ни до базы,
 // ни до ядра: администратор видит причину сразу.
 func TestMasqueradeIsValidatedBeforeApply(t *testing.T) {

@@ -41,6 +41,11 @@ type User struct {
 	// соединения рвутся на первом же пакете.
 	Enabled bool `json:"enabled"`
 
+	// QuotaBytes — месячный лимит трафика в байтах. Ноль означает «без лимита».
+	// Сам расход лежит в бакете quota: он меняется на каждом пакете и не должен
+	// затираться правкой записи.
+	QuotaBytes uint64 `json:"quota_bytes"`
+
 	// CreatedAt и UpdatedAt — когда завели и когда меняли в последний раз.
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -195,7 +200,17 @@ func (s *Store) DeleteUser(id string) error {
 			return errors.New("нет бакета users")
 		}
 
-		return b.Delete([]byte(id))
+		if err := b.Delete([]byte(id)); err != nil {
+			return err
+		}
+
+		if quota := tx.Bucket(bucketQuota); quota != nil {
+			if err := quota.Delete([]byte(id)); err != nil {
+				return err
+			}
+		}
+
+		return nil
 	})
 }
 

@@ -297,6 +297,36 @@ func TestStartWithoutTrafficRecorderFails(t *testing.T) {
 	}
 }
 
+// TestStartRejectsTooSmallBandwidth — ядро принимает ноль или не меньше 64 КиБ/с.
+// Та же проверка есть в конфигурации, но тест держит связь с настоящим ядром:
+// если его минимальный порог изменится, панель узнает об этом здесь.
+func TestStartRejectsTooSmallBandwidth(t *testing.T) {
+	srv, err := hycore.Start(hycore.Config{
+		ListenAddr:    "127.0.0.1:0",
+		TLS:           testCert().tls,
+		Authenticator: fakeAuth{"secret": "alice"},
+		Traffic:       newFakeTraffic(),
+		Bandwidth:     hycore.Bandwidth{Up: 1},
+	})
+	if err == nil {
+		_ = srv.Stop()
+		t.Fatal("сервер поднялся со слишком маленькой скоростью, ожидалась ошибка")
+	}
+}
+
+// TestServerStartsWithBandwidth — допустимый предел не мешает серверу подняться:
+// проверка выше не должна отвергать нормальные значения.
+func TestServerStartsWithBandwidth(t *testing.T) {
+	srv := startServer(t, hycore.Config{
+		Authenticator: fakeAuth{"secret": "alice"},
+		Bandwidth:     hycore.Bandwidth{Up: 65536, Down: 65536},
+	})
+
+	if srv.Addr() == nil {
+		t.Fatal("сервер не слушает адрес")
+	}
+}
+
 // TestClientWithoutTrustedCertificateFails — контроль к предыдущему: без нашего
 // сертификата в корнях клиент не подключается. Если бы тесты отключали проверку
 // сертификата, этот сценарий прошёл бы и ничего не доказывал.

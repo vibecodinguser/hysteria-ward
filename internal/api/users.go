@@ -23,10 +23,17 @@ import (
 // Пароля здесь нет: он уходит только вместе с ключом, а ключ спрашивают отдельно
 // и по одному пользователю. Иначе один запрос списка отдавал бы все пароли сразу.
 type userAnswer struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Enabled   bool      `json:"enabled"`
-	Online    bool      `json:"online"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+	Online  bool   `json:"online"`
+
+	// QuotaBytes — месячный предел в байтах, 0 — без лимита. QuotaUsed — расход
+	// за текущий месяц; QuotaExhausted — предел уже выбран.
+	QuotaBytes     uint64 `json:"quota_bytes"`
+	QuotaUsed      uint64 `json:"quota_used"`
+	QuotaExhausted bool   `json:"quota_exhausted"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -65,7 +72,8 @@ func (s *Server) handleUsers(w http.ResponseWriter, _ *http.Request) {
 // быть, а придуманный человеком рано или поздно окажется коротким.
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Name string `json:"name"`
+		Name       string `json:"name"`
+		QuotaBytes uint64 `json:"quota_bytes"`
 	}
 
 	if err := decodeBody(w, r, &request); err != nil {
@@ -81,6 +89,12 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := checkQuotaBytes(request.QuotaBytes); err != nil {
+		s.answerError(w, http.StatusBadRequest, err.Error())
+
+		return
+	}
+
 	password, err := s.freePassword()
 	if err != nil {
 		s.logger.Error("пароль пользователя", "err", err)
@@ -89,7 +103,12 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := s.store.CreateUser(store.User{Name: name, Password: password, Enabled: true})
+	user, err := s.store.CreateUser(store.User{
+		Name:       name,
+		Password:   password,
+		Enabled:    true,
+		QuotaBytes: request.QuotaBytes,
+	})
 	if err != nil {
 		s.answerStoreError(w, "создание пользователя", err)
 
@@ -110,8 +129,9 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		// nil означает «не менять»: иначе выключенный пользователь включался бы
 		// каждой правкой имени.
-		Name    *string `json:"name"`
-		Enabled *bool   `json:"enabled"`
+		Name       *string `json:"name"`
+		Enabled    *bool   `json:"enabled"`
+		QuotaBytes *uint64 `json:"quota_bytes"`
 	}
 
 	if err := decodeBody(w, r, &request); err != nil {
@@ -146,6 +166,18 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		user.Enabled = *request.Enabled
 	}
 
+	quotaChanged := false
+	if request.QuotaBytes != nil {
+		if err := checkQuotaBytes(*request.QuotaBytes); err != nil {
+			s.answerError(w, http.StatusBadRequest, err.Error())
+
+			return
+		}
+
+		quotaChanged = user.QuotaBytes != *request.QuotaBytes
+		user.QuotaBytes = *request.QuotaBytes
+	}
+
 	updated, err := s.store.UpdateUser(user)
 	if err != nil {
 		s.answerStoreError(w, "правка пользователя", err)
@@ -157,9 +189,46 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("пользователь изменён", "name", updated.Name, "enabled", updated.Enabled)
+	// Новый предел начинает новый отсчёт: иначе понижение квоты сразу упиралось
+	// бы в старый расход, а повышение оставляло бы непонятный остаток.
+	if quotaChanged {
+		if err := s.users.ResetQuota(updated.ID); err != nil {
+			s.answerStoreError(w, "сброс расхода квоты", err)
+
+			return
+		}
+	}
+
+	s.logger.Info("пользователь изменён", "name", updated.Name, "enabled", updated.Enabled,
+		"quota_bytes", updated.QuotaBytes)
 
 	s.answerJSON(w, http.StatusOK, s.userAnswer(updated))
+}
+
+// handleResetQuota обнуляет месячный расход пользователя. Сам предел остаётся
+// прежним: сброс возвращает доступ, не меняя условия.
+func (s *Server) handleResetQuota(w http.ResponseWriter, r *http.Request) {
+	user, found, err := s.store.User(r.PathValue("id"))
+	if err != nil {
+		s.answerStoreError(w, "чтение пользователя", err)
+
+		return
+	}
+	if !found {
+		s.answerError(w, http.StatusNotFound, "пользователя нет")
+
+		return
+	}
+
+	if err := s.users.ResetQuota(user.ID); err != nil {
+		s.answerStoreError(w, "сброс расхода квоты", err)
+
+		return
+	}
+
+	s.logger.Info("расход квоты сброшен", "name", user.Name)
+
+	s.answerJSON(w, http.StatusOK, s.userAnswer(user))
 }
 
 // handleDeleteUser удаляет пользователя. Его активные соединения рвёт ядро: учёт
@@ -301,13 +370,18 @@ func (s *Server) handleUserQR(w http.ResponseWriter, r *http.Request) {
 
 // userAnswer превращает запись в то, что видит интерфейс.
 func (s *Server) userAnswer(user store.User) userAnswer {
+	used, limit, _ := s.users.Quota(user.ID)
+
 	return userAnswer{
-		ID:        user.ID,
-		Name:      user.Name,
-		Enabled:   user.Enabled,
-		Online:    s.users.IsOnline(user.ID),
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
+		ID:             user.ID,
+		Name:           user.Name,
+		Enabled:        user.Enabled,
+		Online:         s.users.IsOnline(user.ID),
+		QuotaBytes:     limit,
+		QuotaUsed:      used,
+		QuotaExhausted: limit > 0 && used >= limit,
+		CreatedAt:      user.CreatedAt,
+		UpdatedAt:      user.UpdatedAt,
 	}
 }
 
@@ -417,6 +491,19 @@ func checkUserName(name string) (string, error) {
 	}
 
 	return name, nil
+}
+
+// maxQuotaBytes — верхняя граница, чтобы опечатка с лишними нулями не превратила
+// квоту в число, которое не помещается в интерфейсе.
+const maxQuotaBytes = 1 << 60
+
+// checkQuotaBytes проверяет предел, введённый администратором.
+func checkQuotaBytes(quota uint64) error {
+	if quota > maxQuotaBytes {
+		return errors.New("квота слишком велика")
+	}
+
+	return nil
 }
 
 // isBadDomain отличает отказ в записи домена от поломки хранилища.

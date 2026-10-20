@@ -32,6 +32,7 @@ func TestYAMLRoundTrip(t *testing.T) {
 		},
 		Obfs:       config.Obfs{Password: "salamander"},
 		Masquerade: config.Masquerade{Mode: config.MasqueradeProxy, Proxy: "https://example.com"},
+		Bandwidth:  config.Bandwidth{Up: 100000, Down: 200000},
 	}
 
 	data, err := original.YAML()
@@ -125,6 +126,14 @@ func TestValidate(t *testing.T) {
 		cases["proxy с адресом "+raw] = brokenProxy
 	}
 
+	tooSlowUp := valid()
+	tooSlowUp.Bandwidth.Up = config.MinBandwidth - 1
+	cases["отдача меньше минимума"] = tooSlowUp
+
+	tooSlowDown := valid()
+	tooSlowDown.Bandwidth.Down = config.MinBandwidth - 1
+	cases["приём меньше минимума"] = tooSlowDown
+
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
 			if err := cfg.Validate(); err == nil {
@@ -135,6 +144,14 @@ func TestValidate(t *testing.T) {
 
 	t.Run("годная конфигурация", func(t *testing.T) {
 		if err := valid().Validate(); err != nil {
+			t.Errorf("Validate() = %v, ожидалось отсутствие ошибки", err)
+		}
+	})
+
+	t.Run("минимальная скорость", func(t *testing.T) {
+		slow := valid()
+		slow.Bandwidth = config.Bandwidth{Up: config.MinBandwidth, Down: config.MinBandwidth}
+		if err := slow.Validate(); err != nil {
 			t.Errorf("Validate() = %v, ожидалось отсутствие ошибки", err)
 		}
 	})

@@ -18,6 +18,13 @@ import (
 	"github.com/apernet/hysteria/extras/v2/obfs"
 )
 
+// Bandwidth — глобальные пределы скорости сервера в байтах в секунду. Ноль
+// означает «без ограничения».
+type Bandwidth struct {
+	Up   uint64
+	Down uint64
+}
+
 // Config — всё, что нужно, чтобы поднять сервер.
 type Config struct {
 	// ListenAddr — адрес и порт для прослушивания. Порт 0 означает «возьми
@@ -34,6 +41,10 @@ type Config struct {
 	// Masquerade — чем отвечать постороннему запросу, пришедшему не по
 	// протоколу Hysteria. Пустой режим означает «выключено».
 	Masquerade Masquerade
+
+	// Bandwidth — глобальные пределы скорости сервера в байтах в секунду. Ноль
+	// означает «без ограничения».
+	Bandwidth Bandwidth
 
 	// Authenticator отвечает, кто стоит за строкой авторизации.
 	Authenticator Authenticator
@@ -111,6 +122,10 @@ func Start(cfg Config) (*Server, error) {
 		Authenticator: &authAdapter{next: cfg.Authenticator},
 		TrafficLogger: &trafficAdapter{next: cfg.Traffic},
 		MasqHandler:   masq,
+		BandwidthConfig: server.BandwidthConfig{
+			MaxTx: cfg.Bandwidth.Up,
+			MaxRx: cfg.Bandwidth.Down,
+		},
 	}
 
 	core, err := server.NewServer(coreCfg)

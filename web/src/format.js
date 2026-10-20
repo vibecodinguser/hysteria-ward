@@ -29,6 +29,23 @@ export function formatRate(bytesPerSecond) {
 	return formatBytes(bytesPerSecond) + '/с'
 }
 
+/** Байты в секунду в Мбит/с: так скорость задают в настройках. */
+export function toMbps(bytesPerSecond) {
+	const value = (Number(bytesPerSecond) || 0) * 8 / 1e6
+
+	return Math.round(value * 100) / 100
+}
+
+/** Мбит/с в байты в секунду: ядро считает в байтах. */
+export function fromMbps(mbps) {
+	const value = Number(mbps)
+	if (!Number.isFinite(value) || value <= 0) {
+		return 0
+	}
+
+	return Math.round(value * 1e6 / 8)
+}
+
 /**
  * Время окна: часы и минуты, а для суток и недели ещё и дата — иначе на семи
  * сутках подписи были бы неразличимы.

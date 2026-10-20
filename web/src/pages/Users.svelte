@@ -1,5 +1,6 @@
 <script>
 	import { m } from '../paraglide/messages.js'
+	import { formatBytes } from '../format.js'
 	import { apiFetch } from '../session.svelte.js'
 
 	// Пользователи сервера: кому выдан ключ, кто включён и кто сейчас подключён.
@@ -12,7 +13,9 @@
 	let failure = $state(null)
 
 	// Заведение пользователя: имя вводит администратор, пароль придумывает панель.
+	// Квота — в гигабайтах; пустое поле означает «без лимита».
 	let newName = $state('')
+	let newQuota = $state('')
 	let creating = $state(false)
 
 	// Ключ показывается по одному пользователю: это секрет, и держать их все
@@ -34,6 +37,11 @@
 	let renameText = $state('')
 	let deleting = $state(null)
 	let sending = $state(false)
+
+	// Квота правится в строке пользователя: инлайн-форма не уводит со страницы и
+	// показывает текущий расход рядом с полем.
+	let quotaFor = $state(null)
+	let quotaText = $state('')
 
 	load()
 
@@ -88,7 +96,7 @@
 		try {
 			const answer = await apiFetch('/api/users', {
 				method: 'POST',
-				body: { name: newName }
+				body: { name: newName, quota_bytes: gibToBytes(newQuota) }
 			})
 
 			if (!answer.ok) {
@@ -98,6 +106,7 @@
 
 			const created = await answer.json()
 			newName = ''
+			newQuota = ''
 
 			await load()
 
@@ -135,6 +144,49 @@
 		if (answer) {
 			renaming = null
 		}
+	}
+
+	function startQuota(user) {
+		quotaFor = user.id
+		quotaText = user.quota_bytes > 0 ? String(roundQuota(user.quota_bytes)) : ''
+	}
+
+	async function saveQuota(user) {
+		const answer = await ask('/api/users/' + encodeURIComponent(user.id), {
+			method: 'PATCH',
+			body: { quota_bytes: gibToBytes(quotaText) }
+		})
+
+		if (answer) {
+			quotaFor = null
+		}
+	}
+
+	async function resetQuota(user) {
+		const answer = await ask('/api/users/' + encodeURIComponent(user.id) + '/quota/reset', {
+			method: 'POST'
+		})
+
+		if (answer) {
+			quotaFor = null
+		}
+	}
+
+	// gibToBytes переводит поле в гигабайтах в байты. Пустое или отрицательное
+	// значение — это ноль, то есть «без лимита».
+	function gibToBytes(value) {
+		const number = Number(value)
+		if (!Number.isFinite(number) || number <= 0) {
+			return 0
+		}
+
+		return Math.round(number * 1024 ** 3)
+	}
+
+	// roundQuota показывает предел в гигабайтах без хвоста из-за двоичного
+	// пересчёта: администратор вводил гигабайты, их и видит.
+	function roundQuota(bytes) {
+		return Math.round((bytes / 1024 ** 3) * 100) / 100
 	}
 
 	async function remove(user) {
@@ -243,6 +295,18 @@
 			aria-label={m.users_name()}
 			class="min-w-56 flex-1 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600"
 		/>
+		<label class="flex items-center gap-2 text-sm text-slate-300">
+			<span>{m.users_quota_gb()}</span>
+			<input
+				type="number"
+				min="0"
+				step="any"
+				bind:value={newQuota}
+				placeholder="0"
+				aria-label={m.users_quota_gb()}
+				class="w-24 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600"
+			/>
+		</label>
 		<button
 			type="submit"
 			disabled={creating}
@@ -315,6 +379,28 @@
 								</span>
 							{/if}
 
+							{#if user.quota_bytes > 0}
+								<span
+									class="rounded px-2 py-0.5 text-xs {user.quota_exhausted
+										? 'bg-rose-950 text-rose-300'
+										: 'bg-slate-800 text-slate-300'}"
+								>
+									{m.users_quota_usage({
+										used: formatBytes(user.quota_used),
+										total: formatBytes(user.quota_bytes)
+									})}
+								</span>
+								{#if user.quota_exhausted}
+									<span class="rounded bg-rose-950 px-2 py-0.5 text-xs text-rose-300">
+										{m.users_quota_exhausted()}
+									</span>
+								{/if}
+							{:else}
+								<span class="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-400">
+									{m.users_quota_unlimited()}
+								</span>
+							{/if}
+
 							<div class="ml-auto flex flex-wrap gap-2 text-sm">
 								<button
 									type="button"
@@ -322,6 +408,13 @@
 									class="rounded border border-slate-700 px-3 py-1.5 text-slate-200 transition-colors hover:border-slate-500 hover:text-white"
 								>
 									{m.users_key()}
+								</button>
+								<button
+									type="button"
+									onclick={() => startQuota(user)}
+									class="rounded border border-slate-700 px-3 py-1.5 text-slate-200 transition-colors hover:border-slate-500 hover:text-white"
+								>
+									{m.users_quota_edit()}
 								</button>
 								<button
 									type="button"
@@ -369,6 +462,53 @@
 							</div>
 						{/if}
 					</div>
+
+					{#if quotaFor === user.id}
+						<form
+							class="mt-4 flex flex-wrap items-end gap-3 rounded border border-slate-800 bg-slate-950/50 p-4"
+							onsubmit={(event) => {
+								event.preventDefault()
+								saveQuota(user)
+							}}
+						>
+							<label class="flex flex-col gap-1 text-sm text-slate-300">
+								<span>{m.users_quota_edit_title()}</span>
+								<input
+									type="number"
+									min="0"
+									step="any"
+									bind:value={quotaText}
+									placeholder="0"
+									class="w-32 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600"
+								/>
+							</label>
+							<span class="text-xs text-slate-500">{m.users_quota_gb_hint()}</span>
+							<button
+								type="submit"
+								disabled={sending}
+								class="rounded bg-slate-100 px-3 py-2 text-sm font-medium text-slate-900 transition-colors hover:bg-white disabled:opacity-60"
+							>
+								{m.users_quota_save()}
+							</button>
+							{#if user.quota_bytes > 0}
+								<button
+									type="button"
+									disabled={sending}
+									onclick={() => resetQuota(user)}
+									class="rounded border border-slate-700 px-3 py-2 text-sm text-slate-200 transition-colors hover:border-slate-500 hover:text-white disabled:opacity-60"
+								>
+									{m.users_quota_reset()}
+								</button>
+							{/if}
+							<button
+								type="button"
+								onclick={() => (quotaFor = null)}
+								class="rounded px-3 py-2 text-sm text-slate-400 transition-colors hover:text-white"
+							>
+								{m.users_quota_cancel()}
+							</button>
+						</form>
+					{/if}
 				</li>
 			{/each}
 		</ul>

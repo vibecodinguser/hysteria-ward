@@ -33,6 +33,35 @@ type Config struct {
 	TLS        TLS        `json:"tls" yaml:"tls"`
 	Obfs       Obfs       `json:"obfs" yaml:"obfs"`
 	Masquerade Masquerade `json:"masquerade" yaml:"masquerade"`
+	Bandwidth  Bandwidth  `json:"bandwidth" yaml:"bandwidth"`
+}
+
+// MinBandwidth — минимальный ненулевой предел скорости, который принимает ядро
+// Hysteria 2: 64 КиБ/с. Меньшее значение ядро отвергает при запуске.
+const MinBandwidth uint64 = 65536
+
+// Bandwidth — глобальные пределы скорости сервера в байтах в секунду. Ноль
+// означает «без ограничения».
+//
+// Hysteria 2 core v2.13 умеет ограничивать скорость только целиком для сервера:
+// персональных пределов в его Authenticator нет. Поэтому это настройка сервера,
+// а не пользователя.
+type Bandwidth struct {
+	Up   uint64 `json:"up" yaml:"up"`
+	Down uint64 `json:"down" yaml:"down"`
+}
+
+// Validate проверяет пределы скорости. Ядро принимает либо ноль, либо не меньше
+// 64 КиБ/с; проверка здесь ловит опечатку до остановки работающего сервера.
+func (b Bandwidth) Validate() error {
+	if b.Up != 0 && b.Up < MinBandwidth {
+		return fmt.Errorf("bandwidth: отдача должна быть 0 или не меньше %d байт/с", MinBandwidth)
+	}
+	if b.Down != 0 && b.Down < MinBandwidth {
+		return fmt.Errorf("bandwidth: приём должен быть 0 или не меньше %d байт/с", MinBandwidth)
+	}
+
+	return nil
 }
 
 // TLS — где лежат сертификат и ключ.
@@ -127,6 +156,10 @@ func (c Config) Validate() error {
 	}
 
 	if err := c.Masquerade.Validate(); err != nil {
+		return err
+	}
+
+	if err := c.Bandwidth.Validate(); err != nil {
 		return err
 	}
 

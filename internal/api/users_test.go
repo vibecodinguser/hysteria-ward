@@ -17,12 +17,15 @@ import (
 
 // userJSON — пользователь, каким его отдаёт панель: пароля здесь нет.
 type userJSON struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Enabled   bool      `json:"enabled"`
-	Online    bool      `json:"online"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Enabled        bool      `json:"enabled"`
+	Online         bool      `json:"online"`
+	QuotaBytes     uint64    `json:"quota_bytes"`
+	QuotaUsed      uint64    `json:"quota_used"`
+	QuotaExhausted bool      `json:"quota_exhausted"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // usersJSON — список пользователей.
@@ -39,6 +42,7 @@ type keyJSON struct {
 type serverJSON struct {
 	Domain     string            `json:"domain"`
 	Masquerade config.Masquerade `json:"masquerade"`
+	Bandwidth  config.Bandwidth  `json:"bandwidth"`
 }
 
 // createUser заводит пользователя и возвращает его, каким его увидел интерфейс.
@@ -187,6 +191,83 @@ func TestUserLifecycle(t *testing.T) {
 	resp = do(t, s, http.MethodGet, "/api/users/"+url.PathEscape(alice.ID)+"/key", "", cookie, nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("ключ удалённого: код %d, ожидался 404", resp.StatusCode)
+	}
+}
+
+// TestUserQuotaIsEnforcedAndReset — квота задаётся при заведении, останавливает
+// трафик и авторизацию, а сброс возвращает доступ.
+func TestUserQuotaIsEnforcedAndReset(t *testing.T) {
+	opts := options(t)
+	s := start(t, opts)
+	cookie, csrf := enter(t, s, "admin", "admin")
+
+	resp := do(t, s, http.MethodPost, "/api/users", `{"name":"alice","quota_bytes":100}`, cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("создание с квотой: код %d, ожидался 201", resp.StatusCode)
+	}
+
+	alice := decode[userJSON](t, resp)
+	if alice.QuotaBytes != 100 || alice.QuotaUsed != 0 || alice.QuotaExhausted {
+		t.Fatalf("после создания квота = %+v", alice)
+	}
+
+	stored, found, err := opts.Store.User(alice.ID)
+	if err != nil || !found {
+		t.Fatalf("User() = found %v, err %v", found, err)
+	}
+
+	connection, ok := opts.Users.Auth(stored.Password)
+	if !ok {
+		t.Fatal("пользователь с квотой не авторизуется")
+	}
+
+	if _, ok := opts.Users.Traffic(connection, 100, 0); !ok {
+		t.Fatal("трафик ровно по квоте не прошёл")
+	}
+	if _, ok := opts.Users.Traffic(connection, 1, 0); ok {
+		t.Fatal("трафик сверх квоты прошёл")
+	}
+	if _, ok := opts.Users.Auth(stored.Password); ok {
+		t.Fatal("исчерпанная квота не остановила авторизацию")
+	}
+
+	users := listUsers(t, s, cookie)
+	if len(users) != 1 || !users[0].QuotaExhausted || users[0].QuotaUsed != 100 {
+		t.Fatalf("список после исчерпания = %+v", users)
+	}
+
+	// Сброс обнуляет расход, но оставляет предел.
+	resp = do(t, s, http.MethodPost, "/api/users/"+url.PathEscape(alice.ID)+"/quota/reset", "", cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("сброс квоты: код %d, ожидался 200", resp.StatusCode)
+	}
+
+	reset := decode[userJSON](t, resp)
+	if reset.QuotaUsed != 0 || reset.QuotaBytes != 100 || reset.QuotaExhausted {
+		t.Errorf("после сброса = %+v, ожидались 0/100 и доступ", reset)
+	}
+	if _, ok := opts.Users.Auth(stored.Password); !ok {
+		t.Error("после сброса квоты пользователь не авторизуется")
+	}
+
+	// Новый предел начинает новый отсчёт, а не наследует старый расход.
+	resp = do(t, s, http.MethodPatch, "/api/users/"+url.PathEscape(alice.ID), `{"quota_bytes":200}`, cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("правка квоты: код %d, ожидался 200", resp.StatusCode)
+	}
+	if got := decode[userJSON](t, resp); got.QuotaBytes != 200 || got.QuotaUsed != 0 {
+		t.Errorf("после правки квоты = %+v", got)
+	}
+
+	// Опечатка с огромным числом не должна попасть в базу.
+	resp = do(t, s, http.MethodPatch, "/api/users/"+url.PathEscape(alice.ID),
+		`{"quota_bytes":18446744073709551615}`, cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("огромная квота: код %d, ожидался 400", resp.StatusCode)
 	}
 }
 

@@ -1,4 +1,5 @@
 <script>
+	import { fromMbps, toMbps } from '../format.js'
 	import { m } from '../paraglide/messages.js'
 	import { apiFetch } from '../session.svelte.js'
 
@@ -27,6 +28,13 @@
 	let masqueradeApplying = $state(false)
 	let masqueradeApplied = $state(false)
 	let masqueradeFailure = $state(null)
+
+	// Глобальные пределы скорости: в интерфейсе — Мбит/с, в базе и ядре — байты
+	// в секунду. Это часть конфигурации ядра, поэтому тоже только по «Применить».
+	let bandwidth = $state({ up: 0, down: 0 })
+	let bandwidthApplying = $state(false)
+	let bandwidthApplied = $state(false)
+	let bandwidthFailure = $state(null)
 
 	// Сертификат: состояние выпуска и путь повторить, если ACME не ответил.
 	// Панель выпускает его в фоне, поэтому страница только показывает, что вышло.
@@ -99,6 +107,10 @@
 			const settings = await answer.json()
 			domain = settings.domain
 			masquerade = settings.masquerade
+			bandwidth = {
+				up: toMbps(settings.bandwidth?.up),
+				down: toMbps(settings.bandwidth?.down)
+			}
 			serverLoaded = true
 		} catch {
 			serverFailure = m.settings_server_failed()
@@ -237,6 +249,45 @@
 			masqueradeFailure = m.session_unreachable()
 		} finally {
 			masqueradeApplying = false
+		}
+	}
+
+	async function applyBandwidth() {
+		// Двойной щелчок не должен перезапускать ядро дважды.
+		if (bandwidthApplying) {
+			return
+		}
+
+		bandwidthApplying = true
+		bandwidthFailure = null
+		bandwidthApplied = false
+
+		try {
+			const answer = await apiFetch('/api/server/apply', {
+				method: 'POST',
+				body: {
+					bandwidth: {
+						up: fromMbps(bandwidth.up),
+						down: fromMbps(bandwidth.down)
+					}
+				}
+			})
+
+			if (!answer.ok) {
+				bandwidthFailure = (await reasonOf(answer)) ?? m.settings_bandwidth_failed()
+				return
+			}
+
+			const settings = await answer.json()
+			bandwidth = {
+				up: toMbps(settings.bandwidth.up),
+				down: toMbps(settings.bandwidth.down)
+			}
+			bandwidthApplied = true
+		} catch {
+			bandwidthFailure = m.session_unreachable()
+		} finally {
+			bandwidthApplying = false
 		}
 	}
 </script>
@@ -415,6 +466,58 @@
 		{#if serverFailure}
 			<p class="mt-3 text-sm text-rose-400" role="alert">{serverFailure}</p>
 		{/if}
+
+		<div class="mt-6 border-t border-slate-800 pt-6">
+			<h3 class="font-semibold">{m.settings_bandwidth_title()}</h3>
+			<p class="mt-2 text-sm text-slate-400">{m.settings_bandwidth_hint()}</p>
+
+			<form
+				class="mt-4 flex flex-wrap items-end gap-3"
+				onsubmit={(event) => {
+					event.preventDefault()
+					applyBandwidth()
+				}}
+			>
+				<label class="flex flex-col gap-1 text-sm text-slate-300">
+					<span>{m.settings_bandwidth_up()}</span>
+					<input
+						type="number"
+						min="0"
+						step="0.1"
+						bind:value={bandwidth.up}
+						class="w-36 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+					/>
+				</label>
+
+				<label class="flex flex-col gap-1 text-sm text-slate-300">
+					<span>{m.settings_bandwidth_down()}</span>
+					<input
+						type="number"
+						min="0"
+						step="0.1"
+						bind:value={bandwidth.down}
+						class="w-36 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+					/>
+				</label>
+
+				<button
+					type="submit"
+					disabled={bandwidthApplying}
+					class="rounded bg-slate-100 px-3 py-2 text-sm font-medium text-slate-900 transition-colors hover:bg-white disabled:opacity-60"
+				>
+					{bandwidthApplying ? m.settings_bandwidth_applying() : m.settings_bandwidth_apply()}
+				</button>
+			</form>
+
+			<p class="mt-3 text-xs text-amber-400/80">{m.settings_bandwidth_restart()}</p>
+
+			{#if bandwidthApplied}
+				<p class="mt-3 text-sm text-emerald-400" role="status">{m.settings_bandwidth_applied()}</p>
+			{/if}
+			{#if bandwidthFailure}
+				<p class="mt-3 text-sm text-rose-400" role="alert">{bandwidthFailure}</p>
+			{/if}
+		</div>
 
 		<div class="mt-6 border-t border-slate-800 pt-6">
 			<h3 class="font-semibold">{m.settings_masquerade_title()}</h3>

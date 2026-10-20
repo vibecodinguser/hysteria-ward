@@ -339,10 +339,14 @@ func startCore(cfg config.Config, registry *users.Registry, traffic *metrics.Col
 	}
 
 	return hycore.Start(hycore.Config{
-		ListenAddr:    cfg.Listen,
-		TLS:           certificate,
-		ObfsPassword:  cfg.Obfs.Password,
-		Masquerade:    masqueradeOf(cfg.Masquerade),
+		ListenAddr:   cfg.Listen,
+		TLS:          certificate,
+		ObfsPassword: cfg.Obfs.Password,
+		Masquerade:   masqueradeOf(cfg.Masquerade),
+		Bandwidth: hycore.Bandwidth{
+			Up:   cfg.Bandwidth.Up,
+			Down: cfg.Bandwidth.Down,
+		},
 		Authenticator: registry,
 		Traffic:       recorder{users: registry, metrics: traffic},
 	})

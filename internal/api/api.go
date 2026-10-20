@@ -248,6 +248,7 @@ func (s *Server) routes(panel http.Handler) http.Handler {
 	mux.HandleFunc("POST /api/users", s.protect(s.handleCreateUser))
 	mux.HandleFunc("PATCH /api/users/{id}", s.protect(s.handleUpdateUser))
 	mux.HandleFunc("DELETE /api/users/{id}", s.protect(s.handleDeleteUser))
+	mux.HandleFunc("POST /api/users/{id}/quota/reset", s.protect(s.handleResetQuota))
 	mux.HandleFunc("GET /api/users/{id}/key", s.protect(s.handleUserKey))
 	mux.HandleFunc("GET /api/users/{id}/qr", s.protect(s.handleUserQR))
 	mux.HandleFunc("POST /api/users/{id}/password", s.protect(s.handleNewPassword))

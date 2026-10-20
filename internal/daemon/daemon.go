@@ -241,9 +241,9 @@ func (d *Daemon) CoreRunning() bool {
 	return d.core != nil
 }
 
-// Close записывает остатки истории, закрывает базу и журнал.
+// Close записывает остатки истории и расхода квот, закрывает базу и журнал.
 func (d *Daemon) Close() error {
-	return errors.Join(d.metrics.Close(), d.db.Close(), d.log.Close())
+	return errors.Join(d.users.FlushQuotas(), d.metrics.Close(), d.db.Close(), d.log.Close())
 }
 
 // Run открывает интерфейс, применяет конфигурацию и работает до отмены контекста
@@ -270,6 +270,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		close(metricsDone)
 	}()
 
+	// Расход квот тоже пишется по часам: горячий путь копит его в памяти, а база
+	// получает готовые значения.
+	quotaDone := make(chan struct{})
+	go func() {
+		d.users.Run(panelCtx)
+		close(quotaDone)
+	}()
+
 	_ = d.Apply()
 
 	panelErr := d.waitForStop(ctx, panelDone)
@@ -278,6 +286,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// рассказывает о том, что происходило с ядром, и должен пережить его.
 	stopPanel()
 	<-metricsDone
+	<-quotaDone
 
 	coreErr := d.stopCore()
 
