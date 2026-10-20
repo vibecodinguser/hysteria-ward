@@ -10,7 +10,7 @@ LDFLAGS := -s -w \
 	-X $(MODULE)/internal/build.version=$(VERSION) \
 	-X $(MODULE)/internal/build.commit=$(COMMIT)
 
-.PHONY: all build ui test lint clean
+.PHONY: all build ui test e2e lint clean
 
 all: test lint build
 
@@ -30,6 +30,12 @@ ui:
 
 test:
 	go test ./...
+
+# loopback-e2e поднимает панель целиком на свободном порту и проходит сценарий
+# по настоящему HTTPS. Отдельная цель — чтобы этот прогон было видно в CI и он
+# не терялся среди модульных тестов.
+e2e:
+	go test ./internal/e2e -count=1 -v
 
 lint:
 	golangci-lint run ./...

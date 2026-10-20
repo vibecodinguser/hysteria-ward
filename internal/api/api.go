@@ -227,6 +227,10 @@ func (s *Server) routes(panel http.Handler) http.Handler {
 	// Вход не защищён сессией: её ещё нет, её и заводят.
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 
+	// Проверка работоспособности открыта: по ней ждут готовности панели, а не
+	// получают доступ к её состоянию.
+	mux.HandleFunc("GET /api/health", s.handleHealth)
+
 	mux.HandleFunc("POST /api/logout", s.protect(s.handleLogout))
 	mux.HandleFunc("GET /api/session", s.protect(s.handleSession))
 	mux.HandleFunc("GET /api/status", s.protect(s.handleStatus))
