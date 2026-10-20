@@ -322,6 +322,17 @@ if [ ! -f "$UNIT" ]; then
 fi
 [ -d /run/systemd/system ] || die "systemd не запущен: обновление рассчитано на systemd-сервер"
 
+# curl нужен для скачивания релиза. На минимальном сервере его может не быть:
+# ставим из штатного репозитория, а не отправляем администратора искать пакет.
+if ! command -v curl >/dev/null 2>&1; then
+	info "ставлю curl"
+	export DEBIAN_FRONTEND=noninteractive
+	apt-get -o DPkg::Lock::Timeout=120 update -qq ||
+		die "не удалось обновить список пакетов"
+	apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends curl ca-certificates ||
+		die "не удалось поставить curl"
+fi
+
 for tool in curl tar gzip sha256sum systemctl runuser; do
 	command -v "$tool" >/dev/null 2>&1 || die "не найден $tool: установите пакет, который его содержит"
 done

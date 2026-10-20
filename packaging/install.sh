@@ -6,9 +6,13 @@
 # готовый бинарь из GitHub Releases. Компиляции на сервере нет.
 #
 # Установка спрашивает то, что нельзя угадать: домен, почту для ACME, режим
-# доступа к панели, masquerade и пароль администратора. Без терминала вопросы не
-# задаются: все ответы должны прийти флагами, иначе скрипт сразу говорит, чего не
-# хватает, вместо того чтобы ждать ввода, которого не будет.
+# доступа к панели и masquerade. Пароль администратора не спрашивается: он
+# генерируется при установке и печатается один раз в самом конце. Без терминала
+# вопросы не задаются: все ответы должны прийти флагами, иначе скрипт сразу
+# говорит, чего не хватает, вместо того чтобы ждать ввода, которого не будет.
+#
+# На первой установке скрипт обновляет систему (apt update и apt upgrade), а curl
+# ставит сам, если его нет: на свежем минимальном образе его может не быть.
 #
 # Повторный запуск безопасен: данные, база и сертификаты не пересоздаются, а
 # бинарь и юнит заменяются только тогда, когда действительно отличаются. Ответы
@@ -54,15 +58,14 @@ MASQUERADE_PROXY=""
 PASSWORD_FILE=""
 GENERATE_PASSWORD=0
 ASSUME_YES=0
+SKIP_UPGRADE=0
 
-# Как будет задан пароль: stdin — уже спрошен и лежит в ADMIN_PASSWORD; file —
-# прочитать из PASSWORD_FILE; generate — придумать при записи настроек.
+# Как будет задан пароль: file — прочитать из PASSWORD_FILE; generate — придумать
+# при записи настроек. По умолчанию пароль генерируется: угадываемого пароля по
+# умолчанию в панели нет.
 PASSWORD_MODE=""
 ADMIN_PASSWORD=""
 
-# Состояние терминала для скрытого ввода. Пустая строка — эхо не выключали.
-STTY_STATE=""
-HIDDEN=""
 TMP=""
 
 usage() {
@@ -77,6 +80,7 @@ usage() {
   --debug                разрешить самоподписанный сертификат, пока настоящего нет
   --no-debug             не разрешать самоподписанный сертификат
   --yes                  не спрашивать подтверждение перед установкой
+  --skip-upgrade         не обновлять систему перед установкой
   --help                 показать эту справку
 
 Ответы конфигуратора:
@@ -89,12 +93,13 @@ usage() {
   --masquerade РЕЖИМ     off, file или proxy
   --masquerade-file КАТ  каталог сайта для file
   --masquerade-proxy URL адрес зеркала для proxy
-  --password-file ФАЙЛ   файл с паролем администратора (одна строка)
-  --generate-password    сгенерировать пароль и показать его один раз
+  --password-file ФАЙЛ   свой пароль администратора вместо сгенерированного
+  --generate-password    оставлен для совместимости: пароль генерируется всегда
 
 С терминалом скрипт спрашивает недостающие ответы и показывает их перед началом
-установки. Без терминала нужны все ответы и один из флагов пароля: скрипт не
-завершается успешно, пока они не собраны, и не ждёт ввода.
+установки. Без терминала нужны все ответы; пароль генерируется сам и печатается
+один раз в конце. На первой установке выполняется apt update и apt upgrade -y;
+--skip-upgrade пропускает этот шаг.
 
 Повторный запуск на уже настроенной панели не трогает базу и ответы
 конфигуратора: обновляются только бинарь, юнит и режим сертификата.
@@ -111,8 +116,21 @@ warn() {
 	printf 'внимание: %s\n' "$*" >&2
 }
 
+# print_generated_password напоминает пароль, если он уже записан в базу. Вывод
+# идёт в stderr: это подсказка при сбое, а не часть успешного результата.
+print_generated_password() {
+	if [ "${PASSWORD_MODE:-}" = "generate" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
+		printf '\nПароль администратора (сохраните): %s\n' "$ADMIN_PASSWORD" >&2
+	fi
+}
+
 die() {
 	printf 'ошибка: %s\n' "$*" >&2
+
+	# Если сбой случился после записи базы, пароль уже действует. Показываем его
+	# и здесь: иначе установка сломалась бы ровно в тот момент, когда доступ
+	# нужен для починки, а пароль остался бы только в хеше.
+	print_generated_password
 	exit 1
 }
 
@@ -146,16 +164,7 @@ valid_proxy() {
 	esac
 }
 
-# restore_terminal возвращает эхо, если read_hidden не успел это сделать сам.
-restore_terminal() {
-	if [ -n "$STTY_STATE" ]; then
-		stty "$STTY_STATE" <&0 2>/dev/null || true
-		STTY_STATE=""
-	fi
-}
-
 cleanup() {
-	restore_terminal
 	if [ -n "$TMP" ]; then
 		rm -rf "$TMP"
 	fi
@@ -163,30 +172,6 @@ cleanup() {
 
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
-
-# read_hidden читает строку, не показывая её на экране. Результат кладётся в
-# HIDDEN, а не печатается: команда в подоболочке не увидела бы состояние
-# терминала и не вернула бы эхо при прерывании.
-read_hidden() {
-	[ -t 0 ] || die "скрытый ввод пароля возможен только с терминала"
-
-	printf '%s' "$1" >&2
-	STTY_STATE="$(stty -g <&0)" || die "не удалось прочитать настройки терминала"
-	stty -echo <&0 || {
-		STTY_STATE=""
-		die "не удалось отключить эхо"
-	}
-
-	HIDDEN=""
-	if ! IFS= read -r HIDDEN; then
-		restore_terminal
-		printf '\n' >&2
-		die "ввод пароля оборван"
-	fi
-
-	restore_terminal
-	printf '\n' >&2
-}
 
 ask_domain() {
 	while :; do
@@ -294,28 +279,6 @@ ask_masquerade_proxy() {
 	done
 }
 
-ask_password() {
-	while :; do
-		read_hidden 'Пароль администратора (пусто — сгенерировать): '
-		if [ -z "$HIDDEN" ]; then
-			PASSWORD_MODE="generate"
-			ADMIN_PASSWORD=""
-			return
-		fi
-
-		PASSWORD_FIRST="$HIDDEN"
-		read_hidden 'Повторите пароль: '
-		if [ "$PASSWORD_FIRST" != "$HIDDEN" ]; then
-			warn "пароли не совпали"
-			continue
-		fi
-
-		PASSWORD_MODE="stdin"
-		ADMIN_PASSWORD="$PASSWORD_FIRST"
-		return
-	done
-}
-
 # show_answers показывает то, что будет записано, до первого изменения в системе.
 show_answers() {
 	case "$PANEL_ACCESS" in
@@ -338,9 +301,9 @@ show_answers() {
 	fi
 
 	case "$PASSWORD_MODE" in
-	generate) PASSWORD_TEXT="будет сгенерирован и показан один раз" ;;
+	generate) PASSWORD_TEXT="будет сгенерирован и показан в конце" ;;
 	file) PASSWORD_TEXT="из файла ${PASSWORD_FILE}" ;;
-	stdin) PASSWORD_TEXT="задан" ;;
+	*) PASSWORD_TEXT="задан" ;;
 	esac
 
 	cat >&2 <<EOF
@@ -511,6 +474,10 @@ while [ "$#" -gt 0 ]; do
 		;;
 	--yes)
 		ASSUME_YES=1
+		shift
+		;;
+	--skip-upgrade)
+		SKIP_UPGRADE=1
 		shift
 		;;
 	--domain)
@@ -707,10 +674,6 @@ else
 
 		[ -z "$MISSING" ] ||
 			die "нет терминала: укажите ответы конфигуратора:$MISSING (см. --help)"
-
-		if [ -z "$PASSWORD_FILE" ] && [ "$GENERATE_PASSWORD" -eq 0 ]; then
-			die "нет терминала: задайте пароль через --password-file или --generate-password"
-		fi
 	fi
 
 	if [ "$INTERACTIVE" -eq 1 ]; then
@@ -727,12 +690,12 @@ else
 		fi
 	fi
 
-	if [ "$GENERATE_PASSWORD" -eq 1 ]; then
-		PASSWORD_MODE="generate"
-	elif [ -n "$PASSWORD_FILE" ]; then
+	# Свой пароль — только явным файлом. Во всех остальных случаях пароль
+	# генерируется: статичного или угадываемого пароля у панели нет.
+	if [ -n "$PASSWORD_FILE" ]; then
 		PASSWORD_MODE="file"
-	elif [ "$INTERACTIVE" -eq 1 ]; then
-		ask_password
+	else
+		PASSWORD_MODE="generate"
 	fi
 
 	validate_answers
@@ -754,6 +717,32 @@ else
 	fi
 fi
 
+# --- обновление системы -----------------------------------------------------
+
+# Свежий VPS часто приходит с устаревшими пакетами. Обновляем его до установки:
+# иначе часть зависимостей и сам systemd остаются в состоянии «как в образе».
+# NEEDRESTART_MODE=l отключает интерактивные вопросы needrestart, которые иначе
+# остановили бы установку без терминала.
+APT_UPDATED=0
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=l
+
+if [ "$SKIP_UPGRADE" -eq 0 ] && [ "$CONFIGURED" -eq 0 ]; then
+	info "обновляю систему: apt update и apt upgrade"
+	apt-get -o DPkg::Lock::Timeout=120 update -qq ||
+		die "не удалось обновить список пакетов"
+	APT_UPDATED=1
+
+	# force-confdef/force-confold: обновление не должно останавливаться на
+	# вопросе о конфигурационном файле. На свежем сервере таких файлов обычно
+	# нет, но образ может прийти с уже изменёнными настройками.
+	apt-get -o DPkg::Lock::Timeout=120 -y \
+		-o Dpkg::Options::=--force-confdef \
+		-o Dpkg::Options::=--force-confold \
+		upgrade ||
+		die "не удалось обновить систему"
+fi
+
 # --- зависимости ------------------------------------------------------------
 
 MISSING=""
@@ -765,14 +754,26 @@ done
 
 if [ -n "$MISSING" ]; then
 	info "ставлю зависимости:$MISSING"
-	export DEBIAN_FRONTEND=noninteractive
-	apt-get -o DPkg::Lock::Timeout=120 update -qq ||
-		die "не удалось обновить список пакетов"
+
+	if [ "$APT_UPDATED" -eq 0 ]; then
+		apt-get -o DPkg::Lock::Timeout=120 update -qq ||
+			die "не удалось обновить список пакетов"
+		APT_UPDATED=1
+	fi
+
 	# Список собран циклом выше; кавычки здесь разбивали бы его на аргументы.
 	# shellcheck disable=SC2086
 	apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends $MISSING ||
 		die "не удалось поставить зависимости"
 fi
+
+# Без curl не скачать ни архив, ни контрольные суммы. На минимальном образе его
+# может не быть; выше он уже поставлен из штатного репозитория. Проверка отдельная,
+# чтобы ошибка говорила о причине, а не «не удалось скачать».
+command -v curl >/dev/null 2>&1 ||
+	die "не найден curl: установите его командой apt-get install -y curl"
+command -v sha256sum >/dev/null 2>&1 ||
+	die "не найден sha256sum: установите пакет coreutils"
 
 # --- пользователь и каталоги ------------------------------------------------
 
@@ -934,8 +935,15 @@ if [ "$CONFIGURED" -eq 0 ]; then
 			die "не удалось сохранить настройки"
 		;;
 	generate)
-		run_setup "$BIN" generate service ||
+		# Пароль печатается не здесь, а в самом конце: в длинном выводе
+		# обновления и запуска его легко не заметить. Пока держим его в
+		# переменной и убираем из промежуточного вывода.
+		SETUP_OUT="$(run_setup "$BIN" generate service)" ||
 			die "не удалось сохранить настройки"
+		ADMIN_PASSWORD="$(printf '%s\n' "$SETUP_OUT" | sed -n 's/^пароль администратора: //p')"
+		[ -n "$ADMIN_PASSWORD" ] ||
+			die "не удалось получить сгенерированный пароль администратора"
+		printf '%s\n' "$SETUP_OUT" | sed '/^пароль администратора: /d'
 		;;
 	*)
 		die "не задан пароль администратора"
@@ -1047,6 +1055,7 @@ if [ "$STREAK" -lt 3 ]; then
 	warn "служба не запустилась"
 	systemctl status --no-pager --lines=20 "$PRODUCT.service" || true
 	journalctl -u "$PRODUCT.service" --no-pager --lines=40 || true
+	print_generated_password
 	exit 1
 fi
 
@@ -1078,19 +1087,11 @@ cat <<EOF
 домен должен указывать на этот сервер, а порт 80 быть свободен; выпуск идёт в
 фоне, панель при этом уже работает.
 
-Пароль администратора задан при установке. Сменить его:
+Сменить пароль администратора:
   systemctl stop ${PRODUCT}
   runuser -u ${PRODUCT} -- ${BIN} passwd
   systemctl start ${PRODUCT}
 EOF
-
-if [ "$PASSWORD_MODE" = "generate" ] && [ "$CONFIGURED" -eq 0 ]; then
-	cat <<EOF
-
-Пароль администратора напечатан выше один раз. Сохраните его: в базе лежит
-только хеш, и восстановить пароль оттуда нельзя.
-EOF
-fi
 
 if [ "$USE_DEBUG" -eq 1 ]; then
 	cat <<EOF
@@ -1100,5 +1101,26 @@ if [ "$USE_DEBUG" -eq 1 ]; then
 сертификата ACME. Панель выпустит его сама и продолжит работать; после появления
 файла в ${CERTS_DIR} повторный запуск установщика уберёт временный режим.
 Причину отказа выпуска и повтор смотрите в интерфейсе панели.
+EOF
+fi
+
+# Пароль — последним блоком: он генерируется при установке и показывается ровно
+# один раз. В базе лежит только хеш, восстановить его оттуда нельзя.
+if [ "$CONFIGURED" -eq 0 ] && [ "$PASSWORD_MODE" = "generate" ]; then
+	cat <<EOF
+
+============================================================
+  Доступ в панель
+  имя:    admin
+  пароль: ${ADMIN_PASSWORD}
+============================================================
+
+Пароль показан один раз. Сохраните его: в базе лежит только хеш,
+и восстановить пароль оттуда нельзя.
+EOF
+elif [ "$CONFIGURED" -eq 1 ]; then
+	cat <<EOF
+
+Пароль администратора не менялся: повторный запуск установщика его не трогает.
 EOF
 fi
