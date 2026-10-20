@@ -47,6 +47,9 @@ func (m *memoryStorage) Credential() (Credential, bool, error) {
 func (m *memoryStorage) SaveCredential(credential Credential) error {
 	m.credential, m.ok = credential, true
 
+	// Как и настоящая база: смена пароля закрывает все входы.
+	clear(m.sessions)
+
 	return nil
 }
 
@@ -188,6 +191,35 @@ func TestLoginAndLogout(t *testing.T) {
 
 	if _, err := s.Check(session.Token); !errors.Is(err, ErrNoSession) {
 		t.Errorf("после выхода Check() = %v, ожидался отказ", err)
+	}
+}
+
+// TestCredentialChangeClosesSessions — смена пароля администратора закрывает все
+// входы. Иначе украденная вместе с cookie сессия пережила бы ровно то действие,
+// ради которого пароль и меняют.
+func TestCredentialChangeClosesSessions(t *testing.T) {
+	s, _ := newService(t, newMemoryStorage(t))
+
+	first, err := s.Login(context.Background(), "127.0.0.1:5000", "admin", "пароль")
+	if err != nil {
+		t.Fatalf("Login() = %v", err)
+	}
+
+	hash, err := Hash("новый пароль")
+	if err != nil {
+		t.Fatalf("Hash() = %v", err)
+	}
+	if err := s.SetCredential(Credential{Name: "admin", Hash: hash}); err != nil {
+		t.Fatalf("SetCredential() = %v", err)
+	}
+
+	if _, err := s.Check(first.Token); !errors.Is(err, ErrNoSession) {
+		t.Errorf("старая сессия: Check() = %v, ожидался отказ", err)
+	}
+
+	// Новый пароль пускает и заводит новую сессию.
+	if _, err := s.Login(context.Background(), "127.0.0.1:5000", "admin", "новый пароль"); err != nil {
+		t.Errorf("вход новым паролем: %v", err)
 	}
 }
 

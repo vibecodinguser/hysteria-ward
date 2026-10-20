@@ -62,6 +62,14 @@ func (s *Store) Credential() (authn.Credential, bool, error) {
 
 // SaveCredential записывает учётные данные администратора. Пароль в открытом виде
 // не сохраняется нигде и никогда: на диске лежит только его хеш.
+//
+// Вместе с учётными данными закрываются все сессии. Пароль меняют в том числе
+// тогда, когда подозревают утечку, и прежние входы в этот момент должны перестать
+// действовать; иначе смена пароля не выкинула бы того, кто уже вошёл. Текущему
+// администратору придётся войти заново — это ожидаемо.
+//
+// Одна транзакция: наполовину записанный пароль рядом с живыми сессиями означал бы
+// панель, которая пускает по старому входу и не пускает по новому.
 func (s *Store) SaveCredential(credential authn.Credential) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b, err := authBucket(tx)
@@ -75,6 +83,20 @@ func (s *Store) SaveCredential(credential authn.Credential) error {
 
 		if err := b.Put(keyAdminHash, []byte(credential.Hash)); err != nil {
 			return fmt.Errorf("хеш пароля: %w", err)
+		}
+
+		sessions, err := sessionsBucket(tx)
+		if err != nil {
+			return err
+		}
+
+		// Удалять можно прямо во время обхода: курсор переживает удаление
+		// текущего ключа.
+		cursor := sessions.Cursor()
+		for key, _ := cursor.First(); key != nil; key, _ = cursor.Next() {
+			if err := cursor.Delete(); err != nil {
+				return fmt.Errorf("закрытие сессий: %w", err)
+			}
 		}
 
 		return nil

@@ -39,7 +39,12 @@ func TestRecorderCountsOnlyAllowedTraffic(t *testing.T) {
 
 	recorder := recorder{users: registry, metrics: collector}
 
-	if !recorder.Traffic(user.ID, 100, 200) {
+	connection, ok := registry.Auth(user.Password)
+	if !ok {
+		t.Fatal("верный пароль не принят")
+	}
+
+	if !recorder.Traffic(connection, 100, 200) {
 		t.Fatal("включённого не пустили")
 	}
 	if got := collector.Sample(); got.Tx != 100 || got.Rx != 200 {
@@ -54,7 +59,7 @@ func TestRecorderCountsOnlyAllowedTraffic(t *testing.T) {
 		t.Fatalf("Reload() = %v", err)
 	}
 
-	if recorder.Traffic(user.ID, 50, 50) {
+	if recorder.Traffic(connection, 50, 50) {
 		t.Fatal("выключенного пустили")
 	}
 	if got := collector.Sample(); got.Tx != 100 || got.Rx != 200 {

@@ -118,6 +118,9 @@ type Storage interface {
 	// Credential возвращает учётные данные администратора. Последнее значение
 	// ложно, если пароль ещё не задавали.
 	Credential() (Credential, bool, error)
+
+	// SaveCredential записывает учётные данные и закрывает все сессии: смена
+	// пароля должна выкидывать тех, кто уже вошёл.
 	SaveCredential(credential Credential) error
 
 	SaveSession(session Session) error

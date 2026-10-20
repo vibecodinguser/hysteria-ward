@@ -45,12 +45,23 @@ func TestAuthFindsEnabledUser(t *testing.T) {
 		t.Fatalf("New() = %v", err)
 	}
 
-	id, ok := registry.Auth("s3cret")
+	connection, ok := registry.Auth("s3cret")
 	if !ok {
 		t.Fatal("верный пароль не принят")
 	}
+
+	id, ok := registry.Resolve(connection)
+	if !ok {
+		t.Fatalf("соединение %q не разобрано", connection)
+	}
 	if id != user.ID {
 		t.Errorf("пользователь = %q, ожидался %q", id, user.ID)
+	}
+
+	// Голый идентификатор пользователя — не строка соединения: без версии пароля
+	// он не говорит, с каким ключом открыто соединение.
+	if _, ok := registry.Resolve(user.ID); ok {
+		t.Error("голый идентификатор пользователя принят за соединение")
 	}
 
 	if _, ok := registry.Auth("s3cret!"); ok {
@@ -94,8 +105,13 @@ func TestTrafficStopsForDisabledAndDeleted(t *testing.T) {
 		t.Fatalf("New() = %v", err)
 	}
 
-	if !registry.Traffic(user.ID, 10, 10) {
-		t.Fatal("трафик включённого пользователя остановлен")
+	connection, ok := registry.Auth("s3cret")
+	if !ok {
+		t.Fatal("верный пароль не принят")
+	}
+
+	if id, ok := registry.Traffic(connection, 10, 10); !ok || id != user.ID {
+		t.Fatalf("трафик включённого = %q, %v; ожидался %q", id, ok, user.ID)
 	}
 
 	user.Enabled = false
@@ -106,7 +122,7 @@ func TestTrafficStopsForDisabledAndDeleted(t *testing.T) {
 		t.Fatalf("Reload() = %v", err)
 	}
 
-	if registry.Traffic(user.ID, 10, 10) {
+	if _, ok := registry.Traffic(connection, 10, 10); ok {
 		t.Error("трафик выключенного пользователя пропущен")
 	}
 
@@ -117,20 +133,20 @@ func TestTrafficStopsForDisabledAndDeleted(t *testing.T) {
 		t.Fatalf("Reload() = %v", err)
 	}
 
-	if registry.Traffic(user.ID, 10, 10) {
+	if _, ok := registry.Traffic(connection, 10, 10); ok {
 		t.Error("трафик удалённого пользователя пропущен")
 	}
 
-	// Неизвестный идентификатор — тоже отказ: связи с ним больше нет.
-	if registry.Traffic("никого", 1, 1) {
-		t.Error("трафик неизвестного пользователя пропущен")
+	// Неизвестное соединение — тоже отказ: связи с ним больше нет.
+	if _, ok := registry.Traffic("никого", 1, 1); ok {
+		t.Error("трафик неизвестного соединения пропущен")
 	}
 }
 
-// TestPasswordChangeAffectsOnlyNewConnections — новый пароль пускает, старый уже
-// нет, но уже открытое соединение не рвётся: ядро опознаёт его по идентификатору
-// пользователя, а не по паролю. Переподключившийся клиент придёт с новым ключом.
-func TestPasswordChangeAffectsOnlyNewConnections(t *testing.T) {
+// TestPasswordChangeDropsOpenConnections — новый пароль пускает, старый уже нет, и
+// соединение, открытое старым ключом, обрывается: учёт трафика видит, что версия
+// пароля в строке соединения больше не совпадает с текущей.
+func TestPasswordChangeDropsOpenConnections(t *testing.T) {
 	s := openStore(t)
 	user := addUser(t, s, "alice", "старый")
 
@@ -138,6 +154,12 @@ func TestPasswordChangeAffectsOnlyNewConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
+
+	old, ok := registry.Auth("старый")
+	if !ok {
+		t.Fatal("старый пароль не принят")
+	}
+	registry.Online(old, true)
 
 	user.Password = "новый"
 	if _, err := s.UpdateUser(user); err != nil {
@@ -150,16 +172,26 @@ func TestPasswordChangeAffectsOnlyNewConnections(t *testing.T) {
 	if _, ok := registry.Auth("старый"); ok {
 		t.Error("старый пароль всё ещё пускает")
 	}
-
-	id, ok := registry.Auth("новый")
-	if !ok || id != user.ID {
-		t.Fatalf("новый пароль = %q, ok %v; ожидался пользователь %q", id, ok, user.ID)
+	if _, ok := registry.Resolve(old); ok {
+		t.Error("старое соединение всё ещё опознаётся")
+	}
+	if _, ok := registry.Traffic(old, 1, 1); ok {
+		t.Error("трафик старого соединения пропущен")
 	}
 
-	// Соединение, открытое со старым ключом, для учёта трафика — тот же
-	// пользователь, поэтому оно продолжается.
-	if !registry.Traffic(user.ID, 1, 1) {
-		t.Error("соединение пользователя оборвалось из-за смены пароля")
+	// Отключение старого соединения снимает отметку «в сети», хотя строка уже не
+	// проходит проверку: иначе пользователь остался бы в сети без соединений.
+	registry.Online(old, false)
+	if registry.IsOnline(user.ID) {
+		t.Error("старое соединение оставило пользователя в сети")
+	}
+
+	fresh, ok := registry.Auth("новый")
+	if !ok {
+		t.Fatal("новый пароль не принят")
+	}
+	if id, ok := registry.Traffic(fresh, 1, 1); !ok || id != user.ID {
+		t.Errorf("новое соединение = %q, %v; ожидался пользователь %q", id, ok, user.ID)
 	}
 }
 
@@ -174,23 +206,28 @@ func TestOnlineState(t *testing.T) {
 		t.Fatalf("New() = %v", err)
 	}
 
+	connection, ok := registry.Auth("s3cret")
+	if !ok {
+		t.Fatal("верный пароль не принят")
+	}
+
 	if registry.IsOnline(user.ID) {
 		t.Error("пользователь сразу считается подключённым")
 	}
 
-	registry.Online(user.ID, true)
+	registry.Online(connection, true)
 	if !registry.IsOnline(user.ID) {
 		t.Error("подключение не запомнено")
 	}
 
-	registry.Online(user.ID, false)
+	registry.Online(connection, false)
 	if registry.IsOnline(user.ID) {
 		t.Error("отключение не запомнено")
 	}
 
 	// Удалённого пользователя список подключённых не помнит: иначе запись о нём
 	// жила бы до перезапуска панели.
-	registry.Online(user.ID, true)
+	registry.Online(connection, true)
 	if err := s.DeleteUser(user.ID); err != nil {
 		t.Fatalf("DeleteUser() = %v", err)
 	}

@@ -19,6 +19,19 @@ import (
 // клиентом Hysteria 2 — другого способа убедиться, что соединение и правда
 // рвётся, нет.
 
+// registryTraffic — список пользователей в роли приёмника трафика. В бою эту роль
+// играет cli.recorder: он ещё и пополняет статистику, а здесь важен только
+// ответ «продолжать или рвать».
+type registryTraffic struct {
+	*users.Registry
+}
+
+func (r registryTraffic) Traffic(id string, tx, rx uint64) bool {
+	_, ok := r.Registry.Traffic(id, tx, rx)
+
+	return ok
+}
+
 // userRegistry заводит базу с одним пользователем и список поверх неё.
 func userRegistry(t *testing.T, enabled bool) (*store.Store, store.User, *users.Registry) {
 	t.Helper()
@@ -47,7 +60,7 @@ func userRegistry(t *testing.T, enabled bool) (*store.Store, store.User, *users.
 func TestDisabledUserCannotConnect(t *testing.T) {
 	db, user, registry := userRegistry(t, false)
 
-	srv := startServer(t, hycore.Config{Authenticator: registry, Traffic: registry})
+	srv := startServer(t, hycore.Config{Authenticator: registry, Traffic: registryTraffic{registry}})
 
 	cfg := trustingClient("s3cret")
 	cfg.ServerAddr = srv.Addr()
@@ -82,7 +95,7 @@ func TestDeletedUserIsDisconnected(t *testing.T) {
 	echoAddr, closeEcho := startEchoServer(t)
 	defer closeEcho()
 
-	srv := startServer(t, hycore.Config{Authenticator: registry, Traffic: registry})
+	srv := startServer(t, hycore.Config{Authenticator: registry, Traffic: registryTraffic{registry}})
 
 	conn := dial(t, srv, trustingClient("s3cret"), echoAddr)
 	roundTrip(t, conn, []byte("до удаления"))
@@ -107,6 +120,42 @@ func TestDeletedUserIsDisconnected(t *testing.T) {
 		_ = c.Close()
 		t.Fatal("удалённый пользователь подключился заново")
 	}
+}
+
+// TestPasswordChangeDisconnects — смена пароля достаёт до активного соединения:
+// учёт трафика видит, что версия пароля в строке соединения устарела, и рвёт его.
+// Клиент переподключается уже новым ключом.
+func TestPasswordChangeDisconnects(t *testing.T) {
+	db, user, registry := userRegistry(t, true)
+
+	echoAddr, closeEcho := startEchoServer(t)
+	defer closeEcho()
+
+	srv := startServer(t, hycore.Config{Authenticator: registry, Traffic: registryTraffic{registry}})
+
+	conn := dial(t, srv, trustingClient("s3cret"), echoAddr)
+	roundTrip(t, conn, []byte("до смены пароля"))
+
+	user.Password = "новый"
+	if _, err := db.UpdateUser(user); err != nil {
+		t.Fatalf("UpdateUser() = %v", err)
+	}
+	if err := registry.Reload(); err != nil {
+		t.Fatalf("Reload() = %v", err)
+	}
+
+	if err := tryRoundTrip(conn, []byte("после смены пароля")); err == nil {
+		t.Fatal("соединение со старым паролем осталось рабочим")
+	}
+
+	// Новый ключ работает: отзыв не закрыл пользователя целиком.
+	cfg := trustingClient("новый")
+	cfg.ServerAddr = srv.Addr()
+	fresh, _, err := client.NewClient(&cfg)
+	if err != nil {
+		t.Fatalf("новый пароль не подключился: %v", err)
+	}
+	_ = fresh.Close()
 }
 
 // tryRoundTrip отправляет байты и ждёт ответа, возвращая ошибку вместо падения

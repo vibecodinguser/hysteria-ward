@@ -8,9 +8,12 @@ package users
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
@@ -70,8 +73,17 @@ func (r *Registry) Reload() error {
 	return nil
 }
 
+// authSeparator разделяет в строке авторизации идентификатор пользователя и
+// версию его пароля. Двоеточие не встречается ни в том, ни в другом.
+const authSeparator = ":"
+
 // Auth отвечает ядру, кто стоит за строкой авторизации. Пускаются только
 // включённые пользователи: выключенный — тот же чужой.
+//
+// Возвращается не идентификатор пользователя, а строка соединения: идентификатор
+// и версия пароля. Ядро передаёт её в учёт трафика на каждом пакете, поэтому по
+// ней видно, с каким паролем соединение открылось. Смена пароля меняет версию, и
+// старое соединение перестаёт проходить проверку — его рвёт следующий пакет.
 func (r *Registry) Auth(password string) (string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -84,38 +96,77 @@ func (r *Registry) Auth(password string) (string, bool) {
 		// Пароли сравниваются за одинаковое время: иначе по времени ответа
 		// можно было бы угадывать пароль по символу.
 		if subtle.ConstantTimeCompare([]byte(user.Password), []byte(password)) == 1 {
-			return id, true
+			return connectionID(id, user.Password), true
 		}
 	}
 
 	return "", false
 }
 
-// Traffic сообщает ядру, продолжать ли соединение. false рвёт его — так
-// выключение и удаление достают до уже подключённых: следующий пакет закрывает
-// соединение.
-func (r *Registry) Traffic(id string, _, _ uint64) bool {
+// Resolve называет пользователя по строке соединения. Строка годится, только пока
+// пароль, с которым соединение открылось, — тот же, что у пользователя сейчас.
+func (r *Registry) Resolve(id string) (string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	user, ok := r.users[id]
+	return r.resolveLocked(id)
+}
 
-	return ok && user.Enabled
+// resolveLocked — Resolve под уже взятым mu.
+func (r *Registry) resolveLocked(id string) (string, bool) {
+	userID, version, ok := strings.Cut(id, authSeparator)
+	if !ok {
+		return "", false
+	}
+
+	user, ok := r.users[userID]
+	if !ok || !user.Enabled {
+		return "", false
+	}
+
+	if subtle.ConstantTimeCompare([]byte(version), []byte(passwordVersion(user.Password))) != 1 {
+		return "", false
+	}
+
+	return userID, true
+}
+
+// Traffic сообщает ядру, продолжать ли соединение, и называет пользователя для
+// статистики. false рвёт соединение — так выключение, удаление и смена пароля
+// достают до уже подключённых: следующий пакет закрывает соединение.
+func (r *Registry) Traffic(id string, _, _ uint64) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.resolveLocked(id)
 }
 
 // Online запоминает, подключён ли пользователь: интерфейс показывает это в
 // списке.
+//
+// Соединение со старым паролем уже не считается: его пользователь либо
+// переподключился с новым, либо сейчас получит отказ на следующем пакете.
 func (r *Registry) Online(id string, online bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if !online {
-		delete(r.online, id)
+		// Отключение старого соединения должно снять отметку, даже если пароль
+		// уже сменился и строка перестала проходить проверку: иначе пользователь
+		// остался бы «в сети» без единого соединения.
+		if userID, _, ok := strings.Cut(id, authSeparator); ok {
+			delete(r.online, userID)
+		}
 
 		return
 	}
 
-	r.online[id] = true
+	userID, ok := r.resolveLocked(id)
+	if !ok {
+		return
+	}
+
+	r.online[userID] = true
 }
 
 // IsOnline сообщает, подключён ли пользователь сейчас.
@@ -140,6 +191,19 @@ func (r *Registry) PasswordInUse(password, exceptID string) bool {
 	}
 
 	return false
+}
+
+// connectionID собирает строку соединения из пользователя и его пароля.
+func connectionID(userID, password string) string {
+	return userID + authSeparator + passwordVersion(password)
+}
+
+// passwordVersion — короткий отпечаток пароля. Сам пароль в строку соединения не
+// попадает: она уходит в учёт трафика и может оказаться в журнале.
+func passwordVersion(password string) string {
+	sum := sha256.Sum256([]byte(password))
+
+	return hex.EncodeToString(sum[:8])
 }
 
 // NewPassword придумывает пароль клиента. Символы — base64url: они переживают

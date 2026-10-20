@@ -372,8 +372,12 @@ type recorder struct {
 // Traffic пропускает пакет и считает его только у того, кого пустили: трафик
 // выключенного пользователя сервер не обслуживает, и в статистику он попасть не
 // должен.
-func (r recorder) Traffic(userID string, tx, rx uint64) bool {
-	if !r.users.Traffic(userID, tx, rx) {
+//
+// Строка соединения — не идентификатор пользователя: в ней ещё и версия пароля.
+// Пользователя называет список, а статистика получает уже его идентификатор.
+func (r recorder) Traffic(id string, tx, rx uint64) bool {
+	userID, ok := r.users.Traffic(id, tx, rx)
+	if !ok {
 		return false
 	}
 
@@ -384,8 +388,8 @@ func (r recorder) Traffic(userID string, tx, rx uint64) bool {
 
 // Online передаёт состояние подключения списку пользователей: «в сети» в
 // интерфейсе показывает именно он.
-func (r recorder) Online(userID string, online bool) {
-	r.users.Online(userID, online)
+func (r recorder) Online(id string, online bool) {
+	r.users.Online(id, online)
 }
 
 // loadCertificate читает сертификат панели. Читается при каждом запуске: «Применить»
