@@ -33,7 +33,10 @@ export function formatRate(bytesPerSecond) {
 export function toMbps(bytesPerSecond) {
 	const value = (Number(bytesPerSecond) || 0) * 8 / 1e6
 
-	return Math.round(value * 100) / 100
+	// Четыре знака, а не два: минимум ядра — 65536 байт/с, это 0,524288 Мбит/с.
+	// После округления до сотых поле показало бы 0,52, и повторное «Применить»
+	// отправило бы 65000 — меньше минимума.
+	return Math.round(value * 10000) / 10000
 }
 
 /** Мбит/с в байты в секунду: ядро считает в байтах. */
