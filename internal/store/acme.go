@@ -24,17 +24,42 @@ var keyACME = []byte("acme")
 var ErrBadEmail = errors.New("недопустимый e-mail")
 
 // ACMESettings — как панель получает сертификат: способ проверки, адрес ACME и
-// хук для DNS-01.
+// настройки DNS-01.
 type ACMESettings struct {
-	// Mode — http (проверка по порту 80) или dns (запись TXT через хук).
+	// Mode — http (проверка по порту 80) или dns (запись TXT).
 	Mode string `json:"mode"`
 
 	// Directory — адрес ACME-каталога. Пустая строка означает Let's Encrypt;
 	// подменяется для проверок на испытательном сервере ACME.
 	Directory string `json:"directory"`
 
+	// DNSProvider — hook (внешняя программа) или cloudflare. Пустое значение в
+	// старых базах означает hook: миграция не нужна.
+	DNSProvider string `json:"dns_provider,omitempty"`
+
 	// DNSHook — программа, которая заводит и убирает записи TXT для DNS-01.
-	DNSHook string `json:"dns_hook"`
+	DNSHook string `json:"dns_hook,omitempty"`
+
+	// CloudflareAPIToken — секрет с правом Zone.DNS Edit (и Zone.Zone Read,
+	// если зона ищется по имени). Он хранится в базе вместе с остальными
+	// настройками и не выводится ни в интерфейс, ни в журнал.
+	CloudflareAPIToken string `json:"cloudflare_api_token,omitempty"`
+
+	// CloudflareZoneID — необязательный идентификатор зоны Cloudflare. Если
+	// пуст, панель ищет зону по имени домена.
+	CloudflareZoneID string `json:"cloudflare_zone_id,omitempty"`
+}
+
+// String печатает настройки без секрета. Так случайный лог или сообщение об
+// ошибке не раскрывает токен Cloudflare.
+func (s ACMESettings) String() string {
+	token := "не задан"
+	if s.CloudflareAPIToken != "" {
+		token = "задан"
+	}
+
+	return fmt.Sprintf("ACMESettings{Mode:%s Directory:%s DNSProvider:%s DNSHook:%s CloudflareAPIToken:%s CloudflareZoneID:%s}",
+		s.Mode, s.Directory, s.DNSProvider, s.DNSHook, token, s.CloudflareZoneID)
 }
 
 // DefaultACMESettings — выпуск по HTTP-01 и Let's Encrypt: работает на любом VPS
@@ -49,6 +74,9 @@ func (s ACMESettings) withDefaults() ACMESettings {
 	if s.Mode == "" {
 		s.Mode = DefaultACMESettings().Mode
 	}
+	if s.Mode == "dns" && s.DNSProvider == "" {
+		s.DNSProvider = "hook"
+	}
 
 	return s
 }
@@ -60,12 +88,32 @@ func (s ACMESettings) withDefaults() ACMESettings {
 func (s ACMESettings) Validate() error {
 	switch s.Mode {
 	case "http":
-		if s.DNSHook != "" {
-			return errors.New("для проверки http хук DNS не нужен")
+		if s.DNSProvider != "" || s.DNSHook != "" || s.CloudflareAPIToken != "" || s.CloudflareZoneID != "" {
+			return errors.New("для проверки http настройки DNS не нужны")
 		}
 	case "dns":
-		if s.DNSHook == "" {
-			return errors.New("для проверки dns нужен хук: без него запись TXT заводить некому")
+		provider := s.DNSProvider
+		if provider == "" {
+			provider = "hook"
+		}
+
+		switch provider {
+		case "hook":
+			if s.DNSHook == "" {
+				return errors.New("для проверки dns с хуком нужна программа: без неё запись TXT заводить некому")
+			}
+			if s.CloudflareAPIToken != "" || s.CloudflareZoneID != "" {
+				return errors.New("для проверки dns с хуком не нужны настройки Cloudflare")
+			}
+		case "cloudflare":
+			if s.CloudflareAPIToken == "" {
+				return errors.New("для проверки dns через Cloudflare нужен API-токен")
+			}
+			if s.DNSHook != "" {
+				return errors.New("для проверки dns через Cloudflare не нужен хук")
+			}
+		default:
+			return fmt.Errorf("неизвестный DNS-провайдер: %q", provider)
 		}
 	default:
 		return fmt.Errorf("неизвестный способ проверки ACME: %q", s.Mode)

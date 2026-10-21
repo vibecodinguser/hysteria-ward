@@ -42,6 +42,15 @@ func TestACMEConfigValidate(t *testing.T) {
 		{"неизвестный режим", func(c *ACMEConfig) { c.Mode = "tls-alpn" }},
 		{"dns без хука", func(c *ACMEConfig) { c.Mode = ModeDNS }},
 		{"http с хуком", func(c *ACMEConfig) { c.DNSHook = "/usr/local/bin/hook" }},
+		{"http с токеном", func(c *ACMEConfig) { c.CloudflareAPIToken = "token" }},
+		{"неизвестный провайдер", func(c *ACMEConfig) { c.Mode = ModeDNS; c.DNSProvider = "route53" }},
+		{"cloudflare без токена", func(c *ACMEConfig) { c.Mode = ModeDNS; c.DNSProvider = DNSProviderCloudflare }},
+		{"cloudflare с хуком", func(c *ACMEConfig) {
+			c.Mode = ModeDNS
+			c.DNSProvider = DNSProviderCloudflare
+			c.CloudflareAPIToken = "token"
+			c.DNSHook = "/usr/local/bin/hook"
+		}},
 		{"плохой каталог", func(c *ACMEConfig) { c.DirectoryURL = "example.com" }},
 		{"каталог с путём", func(c *ACMEConfig) { c.DirectoryURL = "ftp://example.com/dir" }},
 	}
@@ -55,6 +64,35 @@ func TestACMEConfigValidate(t *testing.T) {
 				t.Fatal("Validate() = nil, ожидалась ошибка")
 			}
 		})
+	}
+}
+
+// TestACMEConfigCloudflare — встроенный провайдер не требует хука, а пустой
+// провайдер для DNS-01 означает старый режим с хуком.
+func TestACMEConfigCloudflare(t *testing.T) {
+	config := ACMEConfig{
+		Names:              []string{"example.com"},
+		Email:              "admin@example.com",
+		AccountKeyPath:     "/tmp/account.key",
+		CertPath:           "/tmp/fullchain.pem",
+		KeyPath:            "/tmp/privkey.pem",
+		Mode:               ModeDNS,
+		DNSProvider:        DNSProviderCloudflare,
+		CloudflareAPIToken: "token",
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+
+	legacy := config
+	legacy.DNSProvider = ""
+	legacy.CloudflareAPIToken = ""
+	legacy.DNSHook = "/usr/local/bin/hook"
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("Validate() старого режима = %v", err)
+	}
+	if normalized := legacy.normalized(); normalized.DNSProvider != DNSProviderHook {
+		t.Errorf("провайдер по умолчанию = %q, ожидался hook", normalized.DNSProvider)
 	}
 }
 

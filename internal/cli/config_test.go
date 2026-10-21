@@ -44,6 +44,40 @@ func TestRunConfigCheck(t *testing.T) {
 	}
 }
 
+// TestRunConfigHidesCloudflareToken — проверка показывает провайдера, но не
+// секрет: вывод команды может попасть в журнал или переписку.
+func TestRunConfigHidesCloudflareToken(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hysteria-ward.db")
+	seedSettings(t, dbPath)
+
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	if err := db.SaveACMESettings(store.ACMESettings{
+		Mode:               "dns",
+		DNSProvider:        "cloudflare",
+		CloudflareAPIToken: "secret-token",
+		CloudflareZoneID:   "zone-1",
+	}); err != nil {
+		t.Fatalf("SaveACMESettings() = %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close() = %v", err)
+	}
+
+	code, stdout, stderr := runConfig(t, "--db", dbPath)
+	if code != 0 {
+		t.Fatalf("Run(config) = %d, ожидалось 0; stderr: %q", code, stderr)
+	}
+	if strings.Contains(stdout, "secret-token") || strings.Contains(stderr, "secret-token") {
+		t.Errorf("токен попал в вывод: stdout %q, stderr %q", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Cloudflare") {
+		t.Errorf("в выводе нет провайдера: %q", stdout)
+	}
+}
+
 // TestRunConfigCheckReportsBadSettings — негодная конфигурация видна как ошибка,
 // а не как «всё хорошо».
 func TestRunConfigCheckReportsBadSettings(t *testing.T) {

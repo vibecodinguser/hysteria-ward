@@ -48,9 +48,12 @@ DEBUG_MODE="auto"
 # или «не хватает ответа» (если терминала нет).
 DOMAIN=""
 ACME_EMAIL=""
-ACME_MODE="http"
+ACME_MODE=""
 ACME_DIRECTORY=""
 ACME_DNS_HOOK=""
+ACME_DNS_PROVIDER=""
+ACME_DNS_TOKEN_FILE=""
+ACME_DNS_ZONE_ID=""
 PANEL_ACCESS=""
 MASQUERADE=""
 MASQUERADE_FILE=""
@@ -67,6 +70,9 @@ PASSWORD_MODE=""
 ADMIN_PASSWORD=""
 
 TMP=""
+# Временная копия токена Cloudflare: setup читает её от имени службы, а после
+# записи в базу файл удаляется.
+ACME_TOKEN_TMP=""
 
 usage() {
 	cat <<EOF
@@ -86,9 +92,13 @@ usage() {
 Ответы конфигуратора:
   --domain ИМЯ           домен сервера, например example.com
   --email АДРЕС          e-mail для ACME
-  --acme-mode РЕЖИМ      http (порт 80) или dns (запись TXT через хук)
+  --acme-mode РЕЖИМ      http (порт 80) или dns (запись TXT у DNS-провайдера)
   --acme-directory URL   адрес ACME-каталога (по умолчанию Let's Encrypt)
+  --acme-dns-provider П  DNS-провайдер: hook или cloudflare
   --acme-dns-hook ФАЙЛ   исполняемая программа для записей TXT при dns
+  --acme-dns-token-file Ф файл с API-токеном Cloudflare
+                         (Zone.DNS Edit; для поиска зоны ещё Zone.Zone Read)
+  --acme-dns-zone-id ID  идентификатор зоны Cloudflare (необязательно)
   --access РЕЖИМ         tunnel (SSH-туннель) или public (снаружи)
   --masquerade РЕЖИМ     off, file или proxy
   --masquerade-file КАТ  каталог сайта для file
@@ -168,6 +178,9 @@ cleanup() {
 	if [ -n "$TMP" ]; then
 		rm -rf "$TMP"
 	fi
+	if [ -n "$ACME_TOKEN_TMP" ]; then
+		rm -f "$ACME_TOKEN_TMP"
+	fi
 }
 
 trap cleanup EXIT
@@ -203,6 +216,81 @@ ask_email() {
 
 		warn "нужен полный адрес вида name@example.com"
 	done
+}
+
+ask_acme_mode() {
+	while :; do
+		printf 'Способ проверки ACME (http — порт 80, dns — TXT у DNS-провайдера) [http]: ' >&2
+		if ! IFS= read -r ACME_MODE; then
+			die "ввод способа проверки ACME оборван"
+		fi
+
+		ACME_MODE="$(trim "$ACME_MODE")"
+		[ -n "$ACME_MODE" ] || ACME_MODE="http"
+
+		case "$ACME_MODE" in
+		http|dns) return ;;
+		*) warn "способ проверки ACME: http или dns" ;;
+		esac
+	done
+}
+
+ask_acme_dns_provider() {
+	while :; do
+		printf 'DNS-провайдер (hook — своя программа, cloudflare — API) [hook]: ' >&2
+		if ! IFS= read -r ACME_DNS_PROVIDER; then
+			die "ввод DNS-провайдера оборван"
+		fi
+
+		ACME_DNS_PROVIDER="$(trim "$ACME_DNS_PROVIDER")"
+		[ -n "$ACME_DNS_PROVIDER" ] || ACME_DNS_PROVIDER="hook"
+
+		case "$ACME_DNS_PROVIDER" in
+		hook|cloudflare) return ;;
+		*) warn "DNS-провайдер: hook или cloudflare" ;;
+		esac
+	done
+}
+
+ask_acme_dns_hook() {
+	while :; do
+		printf 'Программа-хук для записей TXT: ' >&2
+		if ! IFS= read -r ACME_DNS_HOOK; then
+			die "ввод хука DNS оборван"
+		fi
+
+		ACME_DNS_HOOK="$(trim "$ACME_DNS_HOOK")"
+		if [ -n "$ACME_DNS_HOOK" ]; then
+			return
+		fi
+
+		warn "нужен путь к исполняемой программе"
+	done
+}
+
+ask_acme_dns_token_file() {
+	while :; do
+		printf 'Файл с API-токеном Cloudflare (право Zone.DNS Edit): ' >&2
+		if ! IFS= read -r ACME_DNS_TOKEN_FILE; then
+			die "ввод файла с токеном Cloudflare оборван"
+		fi
+
+		ACME_DNS_TOKEN_FILE="$(trim "$ACME_DNS_TOKEN_FILE")"
+		if [ -n "$ACME_DNS_TOKEN_FILE" ]; then
+			return
+		fi
+
+		warn "токен читается из файла, чтобы не попасть в историю оболочки"
+	done
+}
+
+ask_acme_dns_zone_id() {
+	printf 'Идентификатор зоны Cloudflare (необязательно, Enter — искать по домену): ' >&2
+	if ! IFS= read -r ACME_DNS_ZONE_ID; then
+		die "ввод идентификатора зоны Cloudflare оборван"
+	fi
+
+	ACME_DNS_ZONE_ID="$(trim "$ACME_DNS_ZONE_ID")"
 }
 
 ask_access() {
@@ -293,7 +381,12 @@ show_answers() {
 	esac
 
 	case "$ACME_MODE" in
-	dns) ACME_TEXT="DNS-01, хук ${ACME_DNS_HOOK}" ;;
+	dns)
+		case "$ACME_DNS_PROVIDER" in
+		cloudflare) ACME_TEXT="DNS-01, Cloudflare" ;;
+		*) ACME_TEXT="DNS-01, хук ${ACME_DNS_HOOK}" ;;
+		esac
+		;;
 	*) ACME_TEXT="HTTP-01" ;;
 	esac
 	if [ -n "$ACME_DIRECTORY" ]; then
@@ -334,19 +427,45 @@ validate_answers() {
 
 	ACME_MODE="$(trim "$ACME_MODE")"
 	ACME_DIRECTORY="$(trim "$ACME_DIRECTORY")"
+	ACME_DNS_PROVIDER="$(trim "$ACME_DNS_PROVIDER")"
 	ACME_DNS_HOOK="$(trim "$ACME_DNS_HOOK")"
+	ACME_DNS_TOKEN_FILE="$(trim "$ACME_DNS_TOKEN_FILE")"
+	ACME_DNS_ZONE_ID="$(trim "$ACME_DNS_ZONE_ID")"
+
+	[ -n "$ACME_MODE" ] || ACME_MODE="http"
 
 	case "$ACME_MODE" in
 	http)
-		[ -z "$ACME_DNS_HOOK" ] ||
-			die "для проверки ACME http не нужен --acme-dns-hook"
+		[ -z "$ACME_DNS_PROVIDER$ACME_DNS_HOOK$ACME_DNS_TOKEN_FILE$ACME_DNS_ZONE_ID" ] ||
+			die "для проверки ACME http не нужны настройки DNS"
 		;;
 	dns)
-		[ -n "$ACME_DNS_HOOK" ] ||
-			die "для проверки ACME dns нужен --acme-dns-hook"
-		if [ ! -f "$ACME_DNS_HOOK" ] || [ ! -x "$ACME_DNS_HOOK" ]; then
-			die "хук DNS должен быть исполняемым файлом: $ACME_DNS_HOOK"
-		fi
+		[ -n "$ACME_DNS_PROVIDER" ] || ACME_DNS_PROVIDER="hook"
+
+		case "$ACME_DNS_PROVIDER" in
+		hook)
+			[ -n "$ACME_DNS_HOOK" ] ||
+				die "для проверки ACME dns с хуком нужен --acme-dns-hook"
+			[ -z "$ACME_DNS_TOKEN_FILE$ACME_DNS_ZONE_ID" ] ||
+				die "для DNS-01 с хуком не нужны настройки Cloudflare"
+			if [ ! -f "$ACME_DNS_HOOK" ] || [ ! -x "$ACME_DNS_HOOK" ]; then
+				die "хук DNS должен быть исполняемым файлом: $ACME_DNS_HOOK"
+			fi
+			;;
+		cloudflare)
+			[ -n "$ACME_DNS_TOKEN_FILE" ] ||
+				die "для DNS-01 Cloudflare нужен --acme-dns-token-file"
+			[ -z "$ACME_DNS_HOOK" ] ||
+				die "для DNS-01 Cloudflare не нужен --acme-dns-hook"
+			[ -f "$ACME_DNS_TOKEN_FILE" ] ||
+				die "файла с токеном Cloudflare нет: $ACME_DNS_TOKEN_FILE"
+			[ -r "$ACME_DNS_TOKEN_FILE" ] ||
+				die "файл с токеном Cloudflare не читается: $ACME_DNS_TOKEN_FILE"
+			;;
+		*)
+			die "DNS-провайдер: hook или cloudflare, получено: $ACME_DNS_PROVIDER"
+			;;
+		esac
 		;;
 	*)
 		die "способ проверки ACME: http или dns, получено: $ACME_MODE"
@@ -428,8 +547,17 @@ run_setup() (
 	if [ -n "$ACME_DIRECTORY" ]; then
 		set -- "$@" --acme-directory "$ACME_DIRECTORY"
 	fi
+	if [ -n "$ACME_DNS_PROVIDER" ]; then
+		set -- "$@" --acme-dns-provider "$ACME_DNS_PROVIDER"
+	fi
 	if [ -n "$ACME_DNS_HOOK" ]; then
 		set -- "$@" --acme-dns-hook "$ACME_DNS_HOOK"
+	fi
+	if [ -n "$ACME_DNS_TOKEN_FILE" ]; then
+		set -- "$@" --acme-dns-token-file "$ACME_DNS_TOKEN_FILE"
+	fi
+	if [ -n "$ACME_DNS_ZONE_ID" ]; then
+		set -- "$@" --acme-dns-zone-id "$ACME_DNS_ZONE_ID"
 	fi
 
 	case "$MASQUERADE" in
@@ -516,6 +644,15 @@ while [ "$#" -gt 0 ]; do
 		ACME_DIRECTORY="${1#*=}"
 		shift
 		;;
+	--acme-dns-provider)
+		[ "$#" -ge 2 ] || die "после --acme-dns-provider нужен провайдер"
+		ACME_DNS_PROVIDER="$2"
+		shift 2
+		;;
+	--acme-dns-provider=*)
+		ACME_DNS_PROVIDER="${1#*=}"
+		shift
+		;;
 	--acme-dns-hook)
 		[ "$#" -ge 2 ] || die "после --acme-dns-hook нужен путь"
 		ACME_DNS_HOOK="$2"
@@ -523,6 +660,24 @@ while [ "$#" -gt 0 ]; do
 		;;
 	--acme-dns-hook=*)
 		ACME_DNS_HOOK="${1#*=}"
+		shift
+		;;
+	--acme-dns-token-file)
+		[ "$#" -ge 2 ] || die "после --acme-dns-token-file нужен путь"
+		ACME_DNS_TOKEN_FILE="$2"
+		shift 2
+		;;
+	--acme-dns-token-file=*)
+		ACME_DNS_TOKEN_FILE="${1#*=}"
+		shift
+		;;
+	--acme-dns-zone-id)
+		[ "$#" -ge 2 ] || die "после --acme-dns-zone-id нужен идентификатор"
+		ACME_DNS_ZONE_ID="$2"
+		shift 2
+		;;
+	--acme-dns-zone-id=*)
+		ACME_DNS_ZONE_ID="${1#*=}"
 		shift
 		;;
 	--access)
@@ -654,7 +809,7 @@ if [ -s "$DB" ]; then
 fi
 
 if [ "$CONFIGURED" -eq 1 ]; then
-	if [ -n "$DOMAIN$ACME_EMAIL$ACME_DIRECTORY$ACME_DNS_HOOK$PANEL_ACCESS$MASQUERADE$MASQUERADE_FILE$MASQUERADE_PROXY$PASSWORD_FILE" ] ||
+	if [ -n "$DOMAIN$ACME_EMAIL$ACME_DIRECTORY$ACME_DNS_PROVIDER$ACME_DNS_HOOK$ACME_DNS_TOKEN_FILE$ACME_DNS_ZONE_ID$PANEL_ACCESS$MASQUERADE$MASQUERADE_FILE$MASQUERADE_PROXY$PASSWORD_FILE" ] ||
 		[ "$GENERATE_PASSWORD" -eq 1 ]; then
 		warn "панель уже настроена: ответы конфигуратора не применяются"
 	fi
@@ -679,6 +834,19 @@ else
 	if [ "$INTERACTIVE" -eq 1 ]; then
 		[ -n "$DOMAIN" ] || ask_domain
 		[ -n "$ACME_EMAIL" ] || ask_email
+		[ -n "$ACME_MODE" ] || ask_acme_mode
+
+		if [ "$ACME_MODE" = "dns" ]; then
+			[ -n "$ACME_DNS_PROVIDER" ] || ask_acme_dns_provider
+			case "$ACME_DNS_PROVIDER" in
+			hook) [ -n "$ACME_DNS_HOOK" ] || ask_acme_dns_hook ;;
+			cloudflare)
+				[ -n "$ACME_DNS_TOKEN_FILE" ] || ask_acme_dns_token_file
+				[ -n "$ACME_DNS_ZONE_ID" ] || ask_acme_dns_zone_id
+				;;
+			esac
+		fi
+
 		[ -n "$PANEL_ACCESS" ] || ask_access
 		[ -n "$MASQUERADE" ] || ask_masquerade
 
@@ -809,6 +977,16 @@ if [ -e "$LOG" ]; then
 	chmod 0600 "$LOG"
 fi
 
+# Токен Cloudflare читает команда setup от имени службы. Исходный файл может
+# лежать в /root; временная копия делает его доступным только службе, а после
+# записи в базу удаляется.
+if [ "$CONFIGURED" -eq 0 ] && [ "$ACME_MODE" = "dns" ] && [ "$ACME_DNS_PROVIDER" = "cloudflare" ]; then
+	ACME_TOKEN_TMP="$STATE_DIR/.cloudflare-token"
+	install -m 0600 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$ACME_DNS_TOKEN_FILE" "$ACME_TOKEN_TMP" ||
+		die "не удалось подготовить файл с токеном Cloudflare"
+	ACME_DNS_TOKEN_FILE="$ACME_TOKEN_TMP"
+fi
+
 # Каталог сайта читает уже не root, а служба. Проверяем это от её имени: иначе
 # установка дошла бы до записи базы и упала на первом же обращении к сайту.
 if [ "$CONFIGURED" -eq 0 ] && [ "$MASQUERADE" = "file" ]; then
@@ -818,11 +996,21 @@ if [ "$CONFIGURED" -eq 0 ] && [ "$MASQUERADE" = "file" ]; then
 	fi
 fi
 
-# Хук DNS запускает служба, а не root: проверяем его от её имени.
+# Хук DNS запускает служба, а не root: проверяем его от её имени. Файл с
+# токеном Cloudflare тоже читает команда настройки от имени службы.
 if [ "$CONFIGURED" -eq 0 ] && [ "$ACME_MODE" = "dns" ]; then
-	if ! runuser -u "$SERVICE_USER" -- test -x "$ACME_DNS_HOOK"; then
-		die "хук DNS $ACME_DNS_HOOK недоступен пользователю $SERVICE_USER: нужен исполняемый файл"
-	fi
+	case "$ACME_DNS_PROVIDER" in
+	cloudflare)
+		if ! runuser -u "$SERVICE_USER" -- test -r "$ACME_DNS_TOKEN_FILE"; then
+			die "файл с токеном Cloudflare $ACME_DNS_TOKEN_FILE недоступен пользователю $SERVICE_USER"
+		fi
+		;;
+	*)
+		if ! runuser -u "$SERVICE_USER" -- test -x "$ACME_DNS_HOOK"; then
+			die "хук DNS $ACME_DNS_HOOK недоступен пользователю $SERVICE_USER: нужен исполняемый файл"
+		fi
+		;;
+	esac
 fi
 
 # --- загрузка релиза --------------------------------------------------------
@@ -951,6 +1139,12 @@ if [ "$CONFIGURED" -eq 0 ]; then
 	esac
 fi
 
+# Токен уже в базе: временная копия больше не нужна.
+if [ -n "$ACME_TOKEN_TMP" ]; then
+	rm -f "$ACME_TOKEN_TMP"
+	ACME_TOKEN_TMP=""
+fi
+
 # До появления настоящего сертификата панель не поднимется: ядро и интерфейс
 # читают один и тот же tls. --debug разрешает интерфейсу (и только ему) выписать
 # самоподписанный сертификат. Как только в certs/ появится файл, похожий на
@@ -1063,8 +1257,24 @@ fi
 
 if [ "$CONFIGURED" -eq 0 ]; then
 	CERT_SUMMARY="Способ проверки: ${ACME_TEXT}."
+	case "$ACME_MODE" in
+	dns)
+		case "$ACME_DNS_PROVIDER" in
+		cloudflare)
+			ACME_NOTE="Для DNS-01 панель создаёт TXT-запись через Cloudflare. Токен уже в базе: файл с ним можно удалить."
+			;;
+		*)
+			ACME_NOTE="Для DNS-01 панель вызывает указанный хук; он должен оставаться доступен службе."
+			;;
+		esac
+		;;
+	*)
+		ACME_NOTE="Для HTTP-01 домен должен указывать на этот сервер, а порт 80 быть свободен."
+		;;
+	esac
 else
 	CERT_SUMMARY="Настройки ACME сохранены при установке."
+	ACME_NOTE=""
 fi
 
 info "готово"
@@ -1083,9 +1293,8 @@ cat <<EOF
 В публичном режиме панель слушает 8443 на всех интерфейсах — откройте её по
 адресу https://panel.${DOMAIN}:8443 после выпуска сертификата.
 
-Сертификат панель выпускает и продлевает сама. ${CERT_SUMMARY} Для HTTP-01
-домен должен указывать на этот сервер, а порт 80 быть свободен; выпуск идёт в
-фоне, панель при этом уже работает.
+Сертификат панель выпускает и продлевает сама. ${CERT_SUMMARY}
+${ACME_NOTE} Выпуск идёт в фоне, панель при этом уже работает.
 
 Сменить пароль администратора:
   systemctl stop ${PRODUCT}

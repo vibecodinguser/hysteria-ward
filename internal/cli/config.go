@@ -211,6 +211,16 @@ func printSettings(w io.Writer, summary settingsSummary) {
 	fmt.Fprintf(w, "masquerade: %s\n", summary.server.Masquerade.Mode)
 	fmt.Fprintf(w, "панель: %s, %d\n", summary.panel.Access, summary.panel.Port)
 	fmt.Fprintf(w, "ACME: %s", summary.acme.Mode)
+	if summary.acme.Mode == "dns" {
+		if summary.acme.DNSProvider == "cloudflare" {
+			fmt.Fprint(w, ", Cloudflare")
+			if summary.acme.CloudflareZoneID != "" {
+				fmt.Fprintf(w, ", зона %s", summary.acme.CloudflareZoneID)
+			}
+		} else {
+			fmt.Fprintf(w, ", хук %s", summary.acme.DNSHook)
+		}
+	}
 	if summary.acme.Directory != "" {
 		fmt.Fprintf(w, ", %s", summary.acme.Directory)
 	}

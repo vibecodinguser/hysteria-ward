@@ -35,8 +35,18 @@ const (
 	ModeHTTP Mode = "http"
 
 	// ModeDNS — проверка по записи TXT. Нужна там, где порт 80 закрыт или домен
-	// обслуживает чужой сервер; запись заводит внешняя программа-хук.
+	// обслуживает чужой сервер.
 	ModeDNS Mode = "dns"
+)
+
+// DNS-провайдеры, которые панель умеет использовать для DNS-01.
+const (
+	// DNSProviderHook — внешняя исполняемая программа. Оставлена для
+	// совместимости и для провайдеров, которых нет среди встроенных.
+	DNSProviderHook = "hook"
+
+	// DNSProviderCloudflare — Cloudflare API с токеном Zone.DNS Edit.
+	DNSProviderCloudflare = "cloudflare"
 )
 
 // Hosts перечисляет имена одного сертификата: домен сервера, по которому
@@ -79,9 +89,23 @@ type ACMEConfig struct {
 	// Mode — способ проверки. По умолчанию HTTP-01.
 	Mode Mode
 
+	// DNSProvider — чем заводить TXT-запись: hook или cloudflare. Пустая
+	// строка для DNS-01 означает hook: так настройки старых баз продолжают
+	// работать без миграции.
+	DNSProvider string
+
 	// DNSHook — программа для DNS-01: вызывается как
 	// «программа present <имя> <значение>» и «программа cleanup <имя> <значение>».
 	DNSHook string
+
+	// CloudflareAPIToken — токен Cloudflare с правом Zone.DNS Edit (и
+	// Zone.Zone Read, если зона ищется по имени). Это секрет: он не
+	// попадает ни в журнал, ни в сообщения об ошибках.
+	CloudflareAPIToken string
+
+	// CloudflareZoneID — необязательный идентификатор зоны. Если пуст, зона
+	// ищется по имени домена через API.
+	CloudflareZoneID string
 
 	// DNSWait — сколько ждать после появления TXT-записи: DNS расходится не
 	// мгновенно. Ноль означает значение по умолчанию.
@@ -105,14 +129,17 @@ const (
 	renewRetryMax = time.Hour
 )
 
-// hookTimeout — предел на одну программу-хук. Без него зависший провайдер
-// держал бы выпуск (а с ним и очистку записи) сколько угодно.
-const hookTimeout = 2 * time.Minute
+// dnsOperationTimeout — предел на одну операцию DNS-провайдера. Без него
+// зависший провайдер держал бы выпуск (а с ним и очистку записи) сколько угодно.
+const dnsOperationTimeout = 2 * time.Minute
 
 // normalized дополняет незаданное значениями по умолчанию.
 func (c ACMEConfig) normalized() ACMEConfig {
 	if c.Mode == "" {
 		c.Mode = ModeHTTP
+	}
+	if c.Mode == ModeDNS && c.DNSProvider == "" {
+		c.DNSProvider = DNSProviderHook
 	}
 	if c.DirectoryURL == "" {
 		c.DirectoryURL = acme.LetsEncryptURL
@@ -151,12 +178,32 @@ func (c ACMEConfig) Validate() error {
 
 	switch c.Mode {
 	case ModeHTTP:
-		if c.DNSHook != "" {
-			return errors.New("для проверки http хук DNS не нужен")
+		if c.DNSProvider != "" || c.DNSHook != "" || c.CloudflareAPIToken != "" || c.CloudflareZoneID != "" {
+			return errors.New("для проверки http настройки DNS не нужны")
 		}
 	case ModeDNS:
-		if c.DNSHook == "" {
-			return errors.New("для DNS-01 нужен хук: без него запись TXT заводить некому")
+		provider := c.DNSProvider
+		if provider == "" {
+			provider = DNSProviderHook
+		}
+
+		switch provider {
+		case DNSProviderHook:
+			if c.DNSHook == "" {
+				return errors.New("для DNS-01 с хуком нужна программа: без неё запись TXT заводить некому")
+			}
+			if c.CloudflareAPIToken != "" || c.CloudflareZoneID != "" {
+				return errors.New("для DNS-01 с хуком не нужны настройки Cloudflare")
+			}
+		case DNSProviderCloudflare:
+			if c.CloudflareAPIToken == "" {
+				return errors.New("для DNS-01 Cloudflare нужен API-токен")
+			}
+			if c.DNSHook != "" {
+				return errors.New("для DNS-01 Cloudflare не нужен хук")
+			}
+		default:
+			return fmt.Errorf("неизвестный DNS-провайдер: %q", provider)
 		}
 	default:
 		return fmt.Errorf("неизвестный способ проверки ACME: %q", c.Mode)
@@ -194,7 +241,8 @@ func Run(ctx context.Context, manager *Manager, config ACMEConfig, onRenew func(
 	}
 
 	config.Logger.Info("выпуск сертификата: слежу за сроком",
-		"names", strings.Join(config.Names, ", "), "mode", string(config.Mode))
+		"names", strings.Join(config.Names, ", "), "mode", string(config.Mode),
+		"dns_provider", config.DNSProvider)
 
 	backoff := renewRetryMin
 
@@ -441,7 +489,12 @@ type challenger interface {
 // startChallenges готовит ответы на проверки нужного режима.
 func startChallenges(client *acme.Client, config ACMEConfig) (challenger, error) {
 	if config.Mode == ModeDNS {
-		return &dnsChallenger{client: client, config: config}, nil
+		provider, err := newDNSProvider(config)
+		if err != nil {
+			return nil, err
+		}
+
+		return &dnsChallenger{client: client, config: config, provider: provider}, nil
 	}
 
 	return newHTTPChallenger(client, config)
@@ -535,10 +588,12 @@ func (h *httpChallenger) Close() {
 	})
 }
 
-// dnsChallenger проходит проверку DNS-01, заказывая запись TXT внешней программе.
+// dnsChallenger проходит проверку DNS-01, заказывая запись TXT выбранному
+// провайдеру: встроенному или внешней программе.
 type dnsChallenger struct {
-	client *acme.Client
-	config ACMEConfig
+	client   *acme.Client
+	config   ACMEConfig
+	provider dnsProvider
 }
 
 // fulfill заводит запись, ждёт её распространения, проходит авторизацию и
@@ -564,15 +619,16 @@ func (d *dnsChallenger) fulfill(ctx context.Context, authorizationURL string) er
 
 	name := authorization.Identifier.Value
 
-	if err := d.callHook(ctx, "present", name, value); err != nil {
+	if err := d.callProvider(ctx, "present", name, value); err != nil {
 		return err
 	}
 
 	// Запись убирается в любом случае: оставленная TXT-запись — чужой мусор в
 	// зоне, а не безобидный след.
 	defer func() {
-		if err := d.callHook(context.WithoutCancel(ctx), "cleanup", name, value); err != nil {
-			d.config.Logger.Warn("запись dns-01 не убрана", "name", name, "err", err)
+		if err := d.callProvider(context.WithoutCancel(ctx), "cleanup", name, value); err != nil {
+			d.config.Logger.Warn("запись dns-01 не убрана",
+				"name", name, "provider", d.config.DNSProvider, "err", err)
 		}
 	}()
 
@@ -583,13 +639,20 @@ func (d *dnsChallenger) fulfill(ctx context.Context, authorizationURL string) er
 	return accept(ctx, d.client, authorization, challenge)
 }
 
-// callHook зовёт хук с пределом времени: зависший провайдер не должен держать
-// выпуск и остановку панели.
-func (d *dnsChallenger) callHook(ctx context.Context, action, name, value string) error {
-	timeout, cancel := context.WithTimeout(ctx, hookTimeout)
+// callProvider выполняет одну операцию провайдера с пределом времени: зависший
+// провайдер не должен держать выпуск и остановку панели.
+func (d *dnsChallenger) callProvider(ctx context.Context, action, name, value string) error {
+	timeout, cancel := context.WithTimeout(ctx, dnsOperationTimeout)
 	defer cancel()
 
-	return runHook(timeout, d.config.DNSHook, action, name, value)
+	switch action {
+	case "present":
+		return d.provider.Present(timeout, name, value)
+	case "cleanup":
+		return d.provider.Cleanup(timeout, name, value)
+	default:
+		return fmt.Errorf("неизвестное действие DNS-провайдера: %q", action)
+	}
 }
 
 // Close у DNS-проверки нечего закрывать: записи убираются в fulfill.

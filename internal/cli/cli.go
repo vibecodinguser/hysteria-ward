@@ -57,7 +57,11 @@ var usage = fmt.Sprintf(`%[1]s — панель управления серве�
   --masquerade-proxy  адрес зеркала для proxy
   --acme-mode         способ проверки ACME: http или dns (по умолчанию http)
   --acme-directory    адрес ACME-каталога (по умолчанию Let's Encrypt)
+  --acme-dns-provider DNS-провайдер для dns: hook или cloudflare
   --acme-dns-hook     программа, которая заводит записи TXT для dns
+  --acme-dns-token-file файл с API-токеном Cloudflare (Zone.DNS Edit;
+                       для поиска зоны ещё Zone.Zone Read)
+  --acme-dns-zone-id  идентификатор зоны Cloudflare (необязательно)
   --password-stdin    прочитать пароль администратора из stdin
   --generate-password сгенерировать пароль и показать его один раз
   --check             только проверить ответы, ничего не записывать
@@ -277,15 +281,18 @@ func acmeBackground(opts daemon.PanelOptions, manager *certs.Manager, apply func
 	}
 
 	config := certs.ACMEConfig{
-		Names:          certs.Hosts(domain),
-		Email:          email,
-		DirectoryURL:   settings.Directory,
-		AccountKeyPath: certs.AccountKeyPath(opts.Config.TLS.Cert),
-		CertPath:       opts.Config.TLS.Cert,
-		KeyPath:        opts.Config.TLS.Key,
-		Mode:           certs.Mode(settings.Mode),
-		DNSHook:        settings.DNSHook,
-		Logger:         opts.Logger,
+		Names:              certs.Hosts(domain),
+		Email:              email,
+		DirectoryURL:       settings.Directory,
+		AccountKeyPath:     certs.AccountKeyPath(opts.Config.TLS.Cert),
+		CertPath:           opts.Config.TLS.Cert,
+		KeyPath:            opts.Config.TLS.Key,
+		Mode:               certs.Mode(settings.Mode),
+		DNSProvider:        settings.DNSProvider,
+		DNSHook:            settings.DNSHook,
+		CloudflareAPIToken: settings.CloudflareAPIToken,
+		CloudflareZoneID:   settings.CloudflareZoneID,
+		Logger:             opts.Logger,
 	}
 
 	return func(ctx context.Context) {

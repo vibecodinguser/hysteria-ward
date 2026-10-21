@@ -40,7 +40,10 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	modeProxy := fs.String("masquerade-proxy", "", "адрес зеркала для режима proxy")
 	acmeMode := fs.String("acme-mode", string(store.DefaultACMESettings().Mode), "способ проверки ACME: http или dns")
 	acmeDirectory := fs.String("acme-directory", "", "адрес ACME-каталога (по умолчанию Let's Encrypt)")
+	acmeDNSProvider := fs.String("acme-dns-provider", "", "DNS-провайдер для dns: hook или cloudflare")
 	acmeDNSHook := fs.String("acme-dns-hook", "", "программа для записей TXT при проверке dns")
+	acmeDNSTokenFile := fs.String("acme-dns-token-file", "", "файл с API-токеном Cloudflare (Zone.DNS Edit; для поиска зоны ещё Zone.Zone Read)")
+	acmeDNSZoneID := fs.String("acme-dns-zone-id", "", "идентификатор зоны Cloudflare (необязательно)")
 	passwordStdin := fs.Bool("password-stdin", false, "прочитать пароль администратора из stdin")
 	generate := fs.Bool("generate-password", false, "сгенерировать пароль и напечатать его один раз")
 	check := fs.Bool("check", false, "только проверить ответы, ничего не записывать")
@@ -77,8 +80,14 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	acme := store.ACMESettings{Mode: *acmeMode, Directory: *acmeDirectory, DNSHook: *acmeDNSHook}
-	if err := setupACME(acme); err != nil {
+	acme := store.ACMESettings{
+		Mode:             *acmeMode,
+		Directory:        *acmeDirectory,
+		DNSProvider:      *acmeDNSProvider,
+		DNSHook:          *acmeDNSHook,
+		CloudflareZoneID: *acmeDNSZoneID,
+	}
+	if err := setupACME(&acme, *acmeDNSTokenFile); err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
@@ -183,9 +192,43 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// setupACME проверяет настройки выпуска сертификата. Хук DNS должен быть
-// исполняемым файлом: иначе выпуск дойдёт до проверки и упадёт уже без панели.
-func setupACME(settings store.ACMESettings) error {
+// setupACME проверяет настройки выпуска сертификата и читает секрет из файла.
+//
+// Токен не принимается аргументом: аргументы видны в списке процессов и
+// остаются в истории оболочки. Файл читается один раз, после чего токен живёт
+// только в базе.
+func setupACME(settings *store.ACMESettings, tokenFile string) error {
+	if settings.Mode == "" {
+		settings.Mode = store.DefaultACMESettings().Mode
+	}
+	if settings.Mode == "dns" && settings.DNSProvider == "" {
+		settings.DNSProvider = "hook"
+	}
+
+	if tokenFile != "" {
+		if settings.Mode != "dns" || settings.DNSProvider != "cloudflare" {
+			return errors.New("--acme-dns-token-file нужен только для DNS-01 через Cloudflare")
+		}
+
+		raw, err := os.ReadFile(tokenFile)
+		if err != nil {
+			return fmt.Errorf("файл с токеном Cloudflare: %w", err)
+		}
+		if len(raw) > 4096 {
+			return errors.New("файл с токеном Cloudflare слишком большой: ожидается одна строка с токеном")
+		}
+
+		token := strings.TrimSpace(string(raw))
+		if token == "" {
+			return errors.New("файл с токеном Cloudflare пуст")
+		}
+		if strings.ContainsAny(token, " \t\r\n") {
+			return errors.New("файл с токеном Cloudflare должен содержать одну строку без пробелов")
+		}
+
+		settings.CloudflareAPIToken = token
+	}
+
 	if err := settings.Validate(); err != nil {
 		return err
 	}
@@ -194,12 +237,19 @@ func setupACME(settings store.ACMESettings) error {
 		return nil
 	}
 
-	info, err := os.Stat(settings.DNSHook)
-	if err != nil {
-		return fmt.Errorf("хук DNS: %w", err)
-	}
-	if info.IsDir() || info.Mode()&0o111 == 0 {
-		return fmt.Errorf("хук DNS %q: нужен исполняемый файл", settings.DNSHook)
+	switch settings.DNSProvider {
+	case "hook":
+		info, err := os.Stat(settings.DNSHook)
+		if err != nil {
+			return fmt.Errorf("хук DNS: %w", err)
+		}
+		if info.IsDir() || info.Mode()&0o111 == 0 {
+			return fmt.Errorf("хук DNS %q: нужен исполняемый файл", settings.DNSHook)
+		}
+	case "cloudflare":
+		if settings.CloudflareAPIToken == "" {
+			return errors.New("для DNS-01 через Cloudflare нужен --acme-dns-token-file")
+		}
 	}
 
 	return nil
@@ -288,6 +338,10 @@ func accessText(access store.Access) string {
 // acmeText называет способ проверки ACME для итогового отчёта.
 func acmeText(settings store.ACMESettings) string {
 	if settings.Mode == "dns" {
+		if settings.DNSProvider == "cloudflare" {
+			return "DNS-01, Cloudflare"
+		}
+
 		return "DNS-01, хук " + settings.DNSHook
 	}
 

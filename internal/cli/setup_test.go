@@ -288,16 +288,77 @@ func TestRunSetupStoresACME(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ACMESettings() = %v", err)
 	}
-	if settings.Mode != "dns" || settings.DNSHook != hook || settings.Directory != "https://acme.example/dir" {
+	if settings.Mode != "dns" || settings.DNSProvider != "hook" ||
+		settings.DNSHook != hook || settings.Directory != "https://acme.example/dir" {
 		t.Errorf("настройки ACME = %+v, ожидались dns с хуком %q", settings, hook)
 	}
 }
 
-// TestRunSetupRejectsBadACME — DNS без хука и неисполняемый хук отклоняются до
-// записи: иначе панель осталась бы без сертификата уже после установки.
+// TestRunSetupStoresCloudflare — Cloudflare-настройки сохраняются, токен
+// читается из файла и не попадает в итоговый отчёт.
+func TestRunSetupStoresCloudflare(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hysteria-ward.db")
+	token := "cloudflare-secret-token"
+	tokenFile := filepath.Join(t.TempDir(), "cloudflare-token")
+	if err := os.WriteFile(tokenFile, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() = %v", err)
+	}
+
+	code, stdout, stderr := runSetup(t, "",
+		"--db", dbPath,
+		"--domain", "example.com",
+		"--email", "admin@example.com",
+		"--access", "tunnel",
+		"--masquerade", "off",
+		"--acme-mode", "dns",
+		"--acme-dns-provider", "cloudflare",
+		"--acme-dns-token-file", tokenFile,
+		"--acme-dns-zone-id", "zone-1",
+		"--generate-password",
+	)
+	if code != 0 {
+		t.Fatalf("Run(setup) = %d, ожидалось 0; stderr: %q", code, stderr)
+	}
+	if strings.Contains(stdout, token) || strings.Contains(stderr, token) {
+		t.Errorf("токен попал в вывод: stdout %q, stderr %q", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "DNS-01, Cloudflare") {
+		t.Errorf("в итоговом отчёте нет провайдера: %q", stdout)
+	}
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	defer s.Close()
+
+	settings, err := s.ACMESettings()
+	if err != nil {
+		t.Fatalf("ACMESettings() = %v", err)
+	}
+	if settings.DNSProvider != "cloudflare" || settings.CloudflareAPIToken != token || settings.CloudflareZoneID != "zone-1" {
+		t.Errorf("настройки ACME = %+v, ожидался Cloudflare с токеном из файла", settings)
+	}
+}
+
+// TestRunSetupRejectsBadACME — DNS без провайдера, неисполняемый хук и токен для
+// чужого режима отклоняются до записи: иначе панель осталась бы без сертификата
+// уже после установки.
 func TestRunSetupRejectsBadACME(t *testing.T) {
 	notExecutable := filepath.Join(t.TempDir(), "hook.sh")
 	if err := os.WriteFile(notExecutable, []byte("#!/bin/sh\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() = %v", err)
+	}
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("token\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() = %v", err)
+	}
+	emptyTokenFile := filepath.Join(t.TempDir(), "empty-token")
+	if err := os.WriteFile(emptyTokenFile, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile() = %v", err)
+	}
+	multilineTokenFile := filepath.Join(t.TempDir(), "multiline-token")
+	if err := os.WriteFile(multilineTokenFile, []byte("token\nsecond-line\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile() = %v", err)
 	}
 
@@ -308,6 +369,12 @@ func TestRunSetupRejectsBadACME(t *testing.T) {
 		{"dns без хука", []string{"--acme-mode", "dns"}},
 		{"хук не исполняется", []string{"--acme-mode", "dns", "--acme-dns-hook", notExecutable}},
 		{"хук для http", []string{"--acme-dns-hook", writeHook(t, t.TempDir())}},
+		{"cloudflare без токена", []string{"--acme-mode", "dns", "--acme-dns-provider", "cloudflare"}},
+		{"пустой токен", []string{"--acme-mode", "dns", "--acme-dns-provider", "cloudflare", "--acme-dns-token-file", emptyTokenFile}},
+		{"токен в несколько строк", []string{"--acme-mode", "dns", "--acme-dns-provider", "cloudflare", "--acme-dns-token-file", multilineTokenFile}},
+		{"токен и хук", []string{"--acme-mode", "dns", "--acme-dns-provider", "cloudflare", "--acme-dns-hook", writeHook(t, t.TempDir()), "--acme-dns-token-file", tokenFile}},
+		{"токен для http", []string{"--acme-dns-token-file", tokenFile}},
+		{"неизвестный провайдер", []string{"--acme-mode", "dns", "--acme-dns-provider", "route53", "--acme-dns-token-file", tokenFile}},
 		{"неизвестный режим", []string{"--acme-mode", "tls-alpn"}},
 		{"плохой каталог", []string{"--acme-directory", "acme.example/dir"}},
 	}
