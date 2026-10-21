@@ -11,7 +11,7 @@
   "overview_range_day": "24 h",
   "overview_range_week": "7 d",
   "overview_chart_title": "Traffic",
-  "overview_chart_step": "{step} s step",
+  "overview_chart_step": "step {step} s",
   "overview_chart_loading": "Building chart…",
   "overview_chart_empty": "Nothing yet: the chart will fill in as clients use the server.",
   "overview_chart_failed": "Could not read traffic history",
