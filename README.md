@@ -7,9 +7,10 @@
 ## Статус
 
 Реализация идёт по этапам [`docs/plan.md`](docs/plan.md): панель, встроенное ядро Hysteria 2, пользователи и
-ключи, метрики, masquerade, установщик с интерактивным конфигуратором и автоматический выпуск сертификата уже
-работают. Текущий релиз — [`v0.2.0`](https://github.com/vibecodinguser/hysteria-ward/releases/tag/v0.2.0).
-Установка на чистый сервер — `packaging/install.sh` из релиза.
+ключи, метрики, masquerade, установщик с интерактивным конфигуратором, автоматический выпуск сертификата и
+MCP-сервер только для чтения уже работают. Текущий релиз —
+[`v0.3.0`](https://github.com/vibecodinguser/hysteria-ward/releases/tag/v0.3.0). Установка на чистый сервер —
+`packaging/install.sh` из релиза.
 
 ## Установка
 
@@ -47,7 +48,7 @@ sudo sh install.sh \
   --masquerade off
 ```
 
-`--version v0.2.0` ставит конкретную версию, `--help` показывает справку. Повторный запуск обновляет бинарь и
+`--version v0.3.0` ставит конкретную версию, `--help` показывает справку. Повторный запуск обновляет бинарь и
 systemd-юнит, но не трогает базу, пользователей, пароль и сертификаты: ответы конфигуратора применяются только
 к пустой базе. Свой пароль вместо сгенерированного задаётся `--password-file`.
 
@@ -95,7 +96,7 @@ ssh -L 8443:127.0.0.1:8443 root@<адрес-сервера>
 ```sh
 curl -fsSL https://github.com/vibecodinguser/hysteria-ward/releases/latest/download/update.sh -o update.sh
 sudo sh update.sh                 # последняя версия
-sudo sh update.sh --version v0.2.0
+sudo sh update.sh --version v0.3.0
 sudo sh update.sh --dry-run       # только план
 sudo sh update.sh --status        # версия, служба, сертификат, порты
 sudo sh update.sh --repair        # привести настройки и права в порядок
