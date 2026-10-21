@@ -22,12 +22,13 @@ var (
 	bucketMetrics  = []byte("metrics")
 	bucketEvents   = []byte("events")
 	bucketQuota    = []byte("quota")
+	bucketAPIKeys  = []byte("apikeys")
 )
 
 // schemaBuckets — бакеты, которые обязаны существовать в текущей схеме.
 var schemaBuckets = [][]byte{
 	bucketMeta, bucketConfig, bucketAuth, bucketUsers, bucketSessions,
-	bucketAppState, bucketMetrics, bucketEvents, bucketQuota,
+	bucketAppState, bucketMetrics, bucketEvents, bucketQuota, bucketAPIKeys,
 }
 
 var (

@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/vibecodinguser/hysteria-ward/internal/authn"
+	"github.com/vibecodinguser/hysteria-ward/internal/build"
 	"github.com/vibecodinguser/hysteria-ward/internal/certs"
+	"github.com/vibecodinguser/hysteria-ward/internal/mcp"
 	"github.com/vibecodinguser/hysteria-ward/internal/metrics"
 	"github.com/vibecodinguser/hysteria-ward/internal/store"
 	"github.com/vibecodinguser/hysteria-ward/internal/users"
@@ -102,6 +104,7 @@ type Server struct {
 	background   func(context.Context)
 	coreRunning  func() bool
 	apply        func() error
+	mcp          *mcp.Handler
 
 	// stopped закрывается при остановке панели. Потоки метрик живут дольше
 	// обычного запроса, и без этого сигнала остановка ждала бы их до конца
@@ -182,6 +185,25 @@ func New(opts Options) (*Server, error) {
 		stopped:      make(chan struct{}),
 	}
 
+	mcpHandler, err := mcp.New(mcp.Options{
+		Authenticate: func(token string) (bool, error) {
+			_, ok, err := opts.Store.AuthenticateAPIKey(token)
+
+			return ok, err
+		},
+		Tools:         server.mcpTools(),
+		Call:          server.callMCPTool,
+		ServerName:    build.Name,
+		ServerVersion: build.Current().Version,
+		Logger:        opts.Logger,
+	})
+	if err != nil {
+		_ = listener.Close()
+
+		return nil, err
+	}
+	server.mcp = mcpHandler
+
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if opts.Certificates != nil {
 		// Сертификат берётся при каждом рукопожатии: продление подменяет его без
@@ -258,6 +280,14 @@ func (s *Server) routes(panel http.Handler) http.Handler {
 
 	// Поток живых значений: одно соединение вместо опроса.
 	mux.HandleFunc("GET /api/events", s.protect(s.handleEvents))
+
+	// MCP — отдельная поверхность для агентов, со своим ключом. Cookie сессии
+	// здесь не принимается: ключ не должен превращаться в административный вход.
+	mux.Handle("/mcp", s.mcp)
+
+	mux.HandleFunc("GET /api/mcp/keys", s.protect(s.handleMCPKeys))
+	mux.HandleFunc("POST /api/mcp/keys", s.protect(s.handleCreateMCPKey))
+	mux.HandleFunc("DELETE /api/mcp/keys/{id}", s.protect(s.handleDeleteMCPKey))
 
 	// Незнакомый путь внутри /api/ — ошибка, а не страница интерфейса.
 	mux.HandleFunc("/api/", s.handleUnknownAPI)

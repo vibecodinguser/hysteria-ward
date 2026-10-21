@@ -44,9 +44,25 @@
 	let certificateSending = $state(false)
 	let certificateRequested = $state(false)
 
+	// MCP-ключи: отдельный вход для агентов. Токен показывается один раз, поэтому
+	// после выпуска он живёт только в этой переменной, пока администратор не
+	// закроет подсказку.
+	let mcpKeys = $state([])
+	let mcpLoading = $state(true)
+	let mcpFailure = $state(null)
+	let mcpName = $state('')
+	let mcpCreating = $state(false)
+	let mcpNewToken = $state(null)
+	let mcpNewName = $state('')
+	let mcpNewID = $state(null)
+	let mcpCopied = $state(false)
+	let mcpConfirming = $state(null)
+	let mcpRevoking = $state(null)
+
 	load()
 	loadServer()
 	loadCertificate()
+	loadMCPKeys()
 
 	async function load() {
 		try {
@@ -201,6 +217,100 @@
 			certificateFailure = m.session_unreachable()
 		} finally {
 			certificateSending = false
+		}
+	}
+
+	async function loadMCPKeys() {
+		try {
+			const answer = await apiFetch('/api/mcp/keys')
+			if (!answer.ok) {
+				mcpFailure = m.settings_mcp_load_failed()
+				return
+			}
+
+			mcpKeys = (await answer.json()).keys
+		} catch {
+			mcpFailure = m.settings_mcp_load_failed()
+		} finally {
+			mcpLoading = false
+		}
+	}
+
+	async function createMCPKey() {
+		// Двойной щелчок не должен выпускать два ключа с одним именем: второй
+		// всё равно получит отказ, но лишний запрос ни к чему.
+		if (mcpCreating || mcpName.trim() === '') {
+			return
+		}
+
+		mcpCreating = true
+		mcpFailure = null
+		mcpCopied = false
+
+		try {
+			const answer = await apiFetch('/api/mcp/keys', {
+				method: 'POST',
+				body: { name: mcpName }
+			})
+
+			if (!answer.ok) {
+				mcpFailure = (await reasonOf(answer)) ?? m.settings_mcp_create_failed()
+				return
+			}
+
+			const created = await answer.json()
+			mcpKeys = [created, ...mcpKeys]
+			mcpNewToken = created.token
+			mcpNewName = created.name
+			mcpNewID = created.id
+			mcpName = ''
+		} catch {
+			mcpFailure = m.session_unreachable()
+		} finally {
+			mcpCreating = false
+		}
+	}
+
+	async function revokeMCPKey(id) {
+		if (mcpRevoking !== null) {
+			return
+		}
+
+		mcpRevoking = id
+		mcpFailure = null
+
+		try {
+			const answer = await apiFetch('/api/mcp/keys/' + encodeURIComponent(id), {
+				method: 'DELETE'
+			})
+			if (!answer.ok) {
+				mcpFailure = (await reasonOf(answer)) ?? m.settings_mcp_revoke_failed()
+				return
+			}
+
+			mcpKeys = mcpKeys.filter((key) => key.id !== id)
+			mcpConfirming = null
+			if (mcpNewID === id) {
+				mcpNewToken = null
+				mcpNewID = null
+			}
+		} catch {
+			mcpFailure = m.session_unreachable()
+		} finally {
+			mcpRevoking = null
+		}
+	}
+
+	async function copyMCPToken() {
+		if (!mcpNewToken) {
+			return
+		}
+
+		try {
+			await navigator.clipboard.writeText(mcpNewToken)
+			mcpCopied = true
+		} catch {
+			mcpFailure = m.settings_mcp_copy_failed()
 		}
 	}
 
@@ -588,5 +698,123 @@
 		<p class="mt-2 text-sm text-rose-400" role="alert">
 			{serverFailure ?? m.settings_server_failed()}
 		</p>
+	{/if}
+</section>
+
+<section class="mt-6 rounded border border-slate-800 bg-slate-900/40 p-6">
+	<h2 class="font-semibold">{m.settings_mcp_title()}</h2>
+	<p class="mt-2 text-sm text-slate-400">{m.settings_mcp_hint()}</p>
+	<p class="mt-2 text-xs text-amber-400/80">{m.settings_mcp_restriction()}</p>
+
+	{#if mcpLoading}
+		<p class="mt-2 text-sm text-slate-400">{m.settings_mcp_loading()}</p>
+	{:else}
+		{#if mcpNewToken}
+			<div class="mt-4 rounded border border-emerald-700/50 bg-emerald-950/30 p-4">
+				<p class="text-sm text-emerald-300" role="status">
+					{m.settings_mcp_created({ name: mcpNewName })}
+				</p>
+				<code class="mt-3 block break-all rounded bg-slate-950 px-3 py-2 font-mono text-sm text-slate-100">
+					{mcpNewToken}
+				</code>
+
+				<div class="mt-3 flex flex-wrap gap-3">
+					<button
+						type="button"
+						onclick={copyMCPToken}
+						class="rounded bg-slate-100 px-3 py-2 text-sm font-medium text-slate-900 transition-colors hover:bg-white"
+					>
+						{mcpCopied ? m.settings_mcp_copied() : m.settings_mcp_copy()}
+					</button>
+					<button
+						type="button"
+						onclick={() => {
+							mcpNewToken = null
+							mcpNewID = null
+						}}
+						class="rounded px-3 py-2 text-sm text-slate-300 transition-colors hover:text-white"
+					>
+						{m.settings_mcp_hide()}
+					</button>
+				</div>
+
+				<p class="mt-3 text-xs text-amber-400/80">{m.settings_mcp_token_hint()}</p>
+			</div>
+		{/if}
+
+		<form
+			class="mt-4 flex flex-wrap gap-3"
+			onsubmit={(event) => {
+				event.preventDefault()
+				createMCPKey()
+			}}
+		>
+			<input
+				type="text"
+				bind:value={mcpName}
+				maxlength="64"
+				placeholder={m.settings_mcp_name_placeholder()}
+				aria-label={m.settings_mcp_name()}
+				autocomplete="off"
+				class="min-w-56 flex-1 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600"
+			/>
+			<button
+				type="submit"
+				disabled={mcpCreating || mcpName.trim() === ''}
+				class="rounded bg-slate-100 px-3 py-2 text-sm font-medium text-slate-900 transition-colors hover:bg-white disabled:opacity-60"
+			>
+				{mcpCreating ? m.settings_mcp_creating() : m.settings_mcp_create()}
+			</button>
+		</form>
+
+		{#if mcpKeys.length === 0}
+			<p class="mt-4 text-sm text-slate-500">{m.settings_mcp_empty()}</p>
+		{:else}
+			<ul class="mt-4 divide-y divide-slate-800 border-t border-slate-800">
+				{#each mcpKeys as key (key.id)}
+					<li class="flex flex-wrap items-center justify-between gap-3 py-3">
+						<div>
+							<p class="text-sm text-slate-100">{key.name}</p>
+							<p class="mt-1 text-xs text-slate-500">
+								{m.settings_mcp_created_at({ date: moment(key.created_at) })}
+							</p>
+						</div>
+
+						{#if mcpConfirming === key.id}
+							<div class="flex flex-wrap items-center gap-3">
+								<span class="text-sm text-slate-300">{m.settings_mcp_confirm()}</span>
+								<button
+									type="button"
+									disabled={mcpRevoking === key.id}
+									onclick={() => revokeMCPKey(key.id)}
+									class="rounded bg-rose-500 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-rose-400 disabled:opacity-60"
+								>
+									{mcpRevoking === key.id ? m.settings_mcp_revoking() : m.settings_mcp_confirm_yes()}
+								</button>
+								<button
+									type="button"
+									onclick={() => (mcpConfirming = null)}
+									class="rounded px-3 py-1.5 text-sm text-slate-300 transition-colors hover:text-white"
+								>
+									{m.settings_mcp_confirm_no()}
+								</button>
+							</div>
+						{:else}
+							<button
+								type="button"
+								onclick={() => (mcpConfirming = key.id)}
+								class="rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:border-rose-500 hover:text-rose-300"
+							>
+								{m.settings_mcp_revoke()}
+							</button>
+						{/if}
+					</li>
+				{/each}
+			</ul>
+		{/if}
+
+		{#if mcpFailure}
+			<p class="mt-4 text-sm text-rose-400" role="alert">{mcpFailure}</p>
+		{/if}
 	{/if}
 </section>

@@ -1,6 +1,7 @@
 package e2e_test
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/url"
@@ -37,6 +38,18 @@ type userAnswer struct {
 // keyAnswer — ключ клиента.
 type keyAnswer struct {
 	URI string `json:"uri"`
+}
+
+// mcpKeyAnswer — выпущенный MCP-ключ.
+type mcpKeyAnswer struct {
+	ID    string `json:"id"`
+	Token string `json:"token"`
+}
+
+// mcpAnswer — ответ JSON-RPC.
+type mcpAnswer struct {
+	Result json.RawMessage `json:"result"`
+	Error  json.RawMessage `json:"error"`
 }
 
 // TestPanelRoundTrip — базовый сценарий: панель поднимается на свободном порту,
@@ -174,4 +187,66 @@ func TestScenarioAddsUserAndKey(t *testing.T) {
 	if query.Get("pinSHA256") == "" {
 		t.Error("в ключе нет отпечатка сертификата")
 	}
+}
+
+// TestScenarioMCPReadOnly — ключ MCP выпускается через интерфейс, проходит
+// рукопожатие, перечисляет инструменты и отзывается. Сценарий идёт по настоящему
+// HTTPS и проверяет, что MCP поднят вместе с панелью, а не только в модульном
+// тесте обработчика.
+func TestScenarioMCPReadOnly(t *testing.T) {
+	panel := e2e.Start(t)
+	panel.Login()
+
+	var key mcpKeyAnswer
+	panel.Post("/api/mcp/keys", `{"name":"agent"}`).
+		Expect(t, http.StatusCreated).
+		Decode(t, &key)
+	if key.ID == "" || key.Token == "" {
+		t.Fatalf("ключ MCP = %+v", key)
+	}
+
+	headers := map[string]string{
+		"Authorization": "Bearer " + key.Token,
+		"Content-Type":  "application/json",
+	}
+
+	var answer mcpAnswer
+	panel.Do(http.MethodPost, "/mcp",
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}`,
+		headers).Expect(t, http.StatusOK).Decode(t, &answer)
+	if len(answer.Error) != 0 {
+		t.Fatalf("initialize вернул ошибку: %s", answer.Error)
+	}
+	var initialized struct {
+		ProtocolVersion string `json:"protocolVersion"`
+		ServerInfo      struct {
+			Name string `json:"name"`
+		} `json:"serverInfo"`
+	}
+	if err := json.Unmarshal(answer.Result, &initialized); err != nil {
+		t.Fatalf("initialize не разобран: %v", err)
+	}
+	if initialized.ProtocolVersion != "2025-03-26" || initialized.ServerInfo.Name == "" {
+		t.Errorf("initialize = %+v", initialized)
+	}
+
+	panel.Do(http.MethodPost, "/mcp", `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`, headers).
+		Expect(t, http.StatusOK).Decode(t, &answer)
+	var listed struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(answer.Result, &listed); err != nil {
+		t.Fatalf("tools/list не разобран: %v", err)
+	}
+	if len(listed.Tools) == 0 {
+		t.Error("tools/list пуст")
+	}
+
+	panel.Do(http.MethodDelete, "/api/mcp/keys/"+url.PathEscape(key.ID), "", nil).
+		Expect(t, http.StatusNoContent)
+
+	panel.Do(http.MethodPost, "/mcp", `{"jsonrpc":"2.0","id":3,"method":"ping"}`, headers).
+		Expect(t, http.StatusUnauthorized)
 }
