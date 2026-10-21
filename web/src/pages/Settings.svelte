@@ -1,5 +1,5 @@
 <script>
-	import { fromMbps, toMbps } from '../format.js'
+	import { formatDateTime, fromMbps, toMbps } from '../format.js'
 	import { m } from '../paraglide/messages.js'
 	import { apiFetch } from '../session.svelte.js'
 
@@ -315,7 +315,7 @@
 	}
 
 	function moment(value) {
-		return new Date(value).toLocaleString()
+		return formatDateTime(value)
 	}
 
 	function known(value) {

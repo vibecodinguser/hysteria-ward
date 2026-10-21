@@ -1,4 +1,5 @@
 <script>
+	import LocaleSwitch from './components/LocaleSwitch.svelte'
 	import { m } from './paraglide/messages.js'
 	import Login from './pages/Login.svelte'
 	import NotFound from './pages/NotFound.svelte'
@@ -45,6 +46,7 @@
 					{/each}
 				</nav>
 				<div class="ml-auto flex items-center gap-x-3 text-sm">
+					<LocaleSwitch />
 					<span class="text-slate-400">{session.name}</span>
 					<button
 						type="button"

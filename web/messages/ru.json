@@ -166,5 +166,6 @@
   "login_name": "Имя",
   "login_password": "Пароль",
   "login_submit": "Войти",
-  "login_submitting": "Входим…"
+  "login_submitting": "Входим…",
+  "locale_switch_label": "Язык интерфейса"
 }

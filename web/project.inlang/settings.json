@@ -2,7 +2,8 @@
   "$schema": "https://inlang.com/schema/project-settings",
   "baseLocale": "ru",
   "locales": [
-    "ru"
+    "ru",
+    "en"
   ],
   "modules": [
     "./node_modules/@inlang/plugin-message-format/dist/index.js",

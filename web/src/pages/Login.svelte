@@ -1,4 +1,5 @@
 <script>
+	import LocaleSwitch from '../components/LocaleSwitch.svelte'
 	import { m } from '../paraglide/messages.js'
 	import { signIn } from '../session.svelte.js'
 
@@ -22,7 +23,11 @@
 	}
 </script>
 
-<main class="flex min-h-screen items-center justify-center bg-slate-950 px-6 py-10 text-slate-100">
+<main class="relative flex min-h-screen items-center justify-center bg-slate-950 px-6 py-10 text-slate-100">
+	<div class="absolute right-6 top-6">
+		<LocaleSwitch />
+	</div>
+
 	<form class="w-full max-w-sm" onsubmit={submit}>
 		<h1 class="text-xl font-semibold">{m.login_title()}</h1>
 		<p class="mt-2 text-sm text-slate-400">{m.login_hint()}</p>

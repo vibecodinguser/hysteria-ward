@@ -3,30 +3,49 @@
 // Считаем в двоичных единицах (1024): так объём показывают и браузеры, и
 // роутеры, а «мегабайт» в панели должен означать то же, что в клиенте.
 
-const units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ', 'ПБ']
+import { getLocale } from './paraglide/runtime.js'
+
+const units = {
+	ru: ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ', 'ПБ'],
+	en: ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+}
+
+const perSecond = { ru: '/с', en: '/s' }
+const intlLocales = { ru: 'ru-RU', en: 'en-US' }
+
+/** Ключ языка, для которого есть единицы и формат даты. */
+function localeKey() {
+	return getLocale() === 'en' ? 'en' : 'ru'
+}
+
+/** Локаль Intl для выбранного языка. */
+function intlLocale() {
+	return intlLocales[localeKey()]
+}
 
 /**
  * Объём: «12,3 МБ». До килобайта — целые байты, дальше две значащие цифры после
  * единиц, чтобы столбец не дёргался на каждой сотой.
  */
 export function formatBytes(bytes) {
+	const scale = units[localeKey()]
 	let value = Number(bytes) || 0
 	let unit = 0
 
-	while (value >= 1024 && unit < units.length - 1) {
+	while (value >= 1024 && unit < scale.length - 1) {
 		value /= 1024
 		unit += 1
 	}
 
 	const digits = unit === 0 ? 0 : value >= 100 ? 0 : value >= 10 ? 1 : 2
-	const number = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: digits }).format(value)
+	const number = new Intl.NumberFormat(intlLocale(), { maximumFractionDigits: digits }).format(value)
 
-	return number + ' ' + units[unit]
+	return number + ' ' + scale[unit]
 }
 
-/** Скорость: «12,3 МБ/с». */
+/** Скорость: «12,3 МБ/с» или «12.3 MB/s». */
 export function formatRate(bytesPerSecond) {
-	return formatBytes(bytesPerSecond) + '/с'
+	return formatBytes(bytesPerSecond) + perSecond[localeKey()]
 }
 
 /** Байты в секунду в Мбит/с: так скорость задают в настройках. */
@@ -60,5 +79,10 @@ export function formatClock(at, withDate = false) {
 		? { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }
 		: { hour: '2-digit', minute: '2-digit' }
 
-	return new Intl.DateTimeFormat('ru-RU', format).format(date)
+	return new Intl.DateTimeFormat(intlLocale(), format).format(date)
+}
+
+/** Дата и время события в выбранной локали. */
+export function formatDateTime(value) {
+	return new Date(value).toLocaleString(intlLocale())
 }
