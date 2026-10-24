@@ -419,16 +419,16 @@
 			<p class="mt-1 text-sm text-slate-400">
 				{m.settings_panel_host({ host: panel.host })}
 			</p>
-			{#if panel.access === 'public'}
-				<a
-					class="mt-2 inline-block text-sm text-sky-400 transition-colors hover:text-sky-300"
-					href={`https://${panel.host}:8443`}
-					target="_blank"
-					rel="noreferrer"
-				>
-					{m.settings_panel_host_link({ host: panel.host })}
-				</a>
-			{/if}
+			<a
+				class="mt-2 inline-block text-sm text-sky-400 transition-colors hover:text-sky-300"
+				href={panel.access === 'public' ? `https://${panel.host}:8443` : 'https://127.0.0.1:8443'}
+				target="_blank"
+				rel="noreferrer"
+			>
+				{panel.access === 'public'
+					? m.settings_panel_host_link({ host: panel.host })
+					: m.settings_panel_tunnel_link()}
+			</a>
 		{/if}
 
 		{#if panel.access === 'public'}

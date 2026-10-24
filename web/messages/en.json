@@ -76,6 +76,7 @@
   "settings_panel_listening": "Panel is listening on {addr}",
   "settings_panel_host": "Panel domain: {host}",
   "settings_panel_host_link": "Open the panel at {host}",
+  "settings_panel_tunnel_link": "Open through the SSH tunnel",
   "settings_panel_public": "The panel is exposed to the internet: scanners and anyone probing addresses can see it.",
   "settings_panel_open": "Expose panel to the internet",
   "settings_panel_close": "Hide panel behind SSH tunnel",

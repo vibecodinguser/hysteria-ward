@@ -76,6 +76,7 @@
   "settings_panel_listening": "Панель слушает {addr}",
   "settings_panel_host": "Домен панели: {host}",
   "settings_panel_host_link": "Открыть панель по домену {host}",
+  "settings_panel_tunnel_link": "Открыть через SSH-туннель",
   "settings_panel_public": "Панель открыта наружу: её видят сканеры и все, кто перебирает адреса в интернете.",
   "settings_panel_open": "Открыть панель наружу",
   "settings_panel_close": "Скрыть панель за SSH-туннелем",
