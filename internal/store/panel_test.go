@@ -357,6 +357,33 @@ func TestPanelSettingsServerDomainChange(t *testing.T) {
 	}
 }
 
+// TestPanelSettingsEmptyRecordUsesDefault — база без ключа panel ещё не проходила
+// конфигуратор, поэтому правило старой записи к ней не применяется: иначе новый
+// домен panel.* разрешил бы публичную панель поверх домена сервера.
+func TestPanelSettingsEmptyRecordUsesDefault(t *testing.T) {
+	s := openStore(t)
+
+	if err := s.SaveDomain("panel.example.com"); err != nil {
+		t.Fatalf("SaveDomain() = %v", err)
+	}
+
+	settings, err := s.PanelSettings()
+	if err != nil {
+		t.Fatalf("PanelSettings() = %v", err)
+	}
+	if settings.Mode != store.PanelModeSubdomain {
+		t.Errorf("режим = %q, ожидался subdomain", settings.Mode)
+	}
+	if host := settings.Host("panel.example.com"); host != "panel.panel.example.com" {
+		t.Errorf("домен панели = %q, ожидался panel.panel.example.com", host)
+	}
+
+	settings.Access = store.AccessPublic
+	if err := settings.ValidateFor("panel.example.com"); err != nil {
+		t.Fatalf("публичная панель на отдельном имени = %v", err)
+	}
+}
+
 // TestPanelSettingsLegacyPublicOnPanelDomain — старая база с доменом panel.* и
 // публичной панелью продолжает открываться: до появления режимов это было
 // штатное поведение, и обновление не должно его ломать.
