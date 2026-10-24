@@ -1380,7 +1380,7 @@ else
 		[ -n "$MASQUERADE" ] || MISSING="$MISSING --masquerade"
 
 		[ -z "$MISSING" ] ||
-			die "нет терминала: укажите ответы конфигуратора:$MISSING (см. --help)"
+			die "нет терминала: укажите ответы конфигуратора:$MISSING $(translate '(см. --help)')"
 	fi
 
 	if [ "$INTERACTIVE" -eq 1 ]; then
