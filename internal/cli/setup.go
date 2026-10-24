@@ -210,20 +210,9 @@ func setupACME(settings *store.ACMESettings, tokenFile string) error {
 			return errors.New("--acme-dns-token-file нужен только для DNS-01 через Cloudflare")
 		}
 
-		raw, err := os.ReadFile(tokenFile)
+		token, err := readCloudflareToken(tokenFile)
 		if err != nil {
-			return fmt.Errorf("файл с токеном Cloudflare: %w", err)
-		}
-		if len(raw) > 4096 {
-			return errors.New("файл с токеном Cloudflare слишком большой: ожидается одна строка с токеном")
-		}
-
-		token := strings.TrimSpace(string(raw))
-		if token == "" {
-			return errors.New("файл с токеном Cloudflare пуст")
-		}
-		if strings.ContainsAny(token, " \t\r\n") {
-			return errors.New("файл с токеном Cloudflare должен содержать одну строку без пробелов")
+			return err
 		}
 
 		settings.CloudflareAPIToken = token
@@ -239,12 +228,8 @@ func setupACME(settings *store.ACMESettings, tokenFile string) error {
 
 	switch settings.DNSProvider {
 	case "hook":
-		info, err := os.Stat(settings.DNSHook)
-		if err != nil {
-			return fmt.Errorf("хук DNS: %w", err)
-		}
-		if info.IsDir() || info.Mode()&0o111 == 0 {
-			return fmt.Errorf("хук DNS %q: нужен исполняемый файл", settings.DNSHook)
+		if err := checkDNSHook(settings.DNSHook); err != nil {
+			return err
 		}
 	case "cloudflare":
 		if settings.CloudflareAPIToken == "" {

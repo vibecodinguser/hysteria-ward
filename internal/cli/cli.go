@@ -31,6 +31,7 @@ var usage = fmt.Sprintf(`%[1]s — панель управления серве�
   %[1]s serve [флаги]
   %[1]s passwd [флаги]
   %[1]s setup [флаги]
+  %[1]s acme [флаги]
   %[1]s config [флаги]
   %[1]s [флаг]
 
@@ -67,6 +68,16 @@ var usage = fmt.Sprintf(`%[1]s — панель управления серве�
   --check             только проверить ответы, ничего не записывать
   --cert, --key       пути сертификата и ключа
 
+Флаги acme:
+  --db         файл базы (по умолчанию %[2]s)
+  --mode       способ проверки: http или dns
+  --directory  адрес ACME-каталога
+  --provider   DNS-провайдер: hook или cloudflare
+  --hook       программа для записей TXT
+  --token-file файл с API-токеном Cloudflare
+  --zone-id    идентификатор зоны Cloudflare
+  без флагов — показать текущие настройки
+
 Флаги config:
   --db      файл базы (по умолчанию %[2]s)
   --check   только проверить настройки, ничего не записывать (по умолчанию)
@@ -79,6 +90,9 @@ var usage = fmt.Sprintf(`%[1]s — панель управления серве�
 setup — команда установщика, а не второй интерфейс настройки: она записывает ответы
 конфигуратора до первого запуска службы и не переписывает уже настроенную базу.
 Домен, доступ и masquerade дальше меняются из интерфейса панели.
+
+acme меняет способ проверки и DNS-провайдера на уже настроенной базе. Панель перед
+этим нужно остановить; после записи — запустить снова.
 `, build.Name, defaultDBPath, defaultLogPath)
 
 // Где панель хранит базу и журнал по умолчанию. Пути в духе FHS: настройки и
@@ -110,6 +124,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 
 	case "setup":
 		return runSetup(args[1:], stdin, stdout, stderr)
+
+	case "acme":
+		return runACME(args[1:], stdout, stderr)
 
 	case "config":
 		return runConfig(args[1:], stdout, stderr)
