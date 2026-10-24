@@ -5,11 +5,12 @@
 # пакетным менеджером, заводит службу systemd, раскладывает каталоги и скачивает
 # готовый бинарь из GitHub Releases. Компиляции на сервере нет.
 #
-# Установка спрашивает то, что нельзя угадать: домен, почту для ACME, режим
-# доступа к панели и masquerade. Пароль администратора не спрашивается: он
-# генерируется при установке и печатается один раз в самом конце. Без терминала
-# вопросы не задаются: все ответы должны прийти флагами, иначе скрипт сразу
-# говорит, чего не хватает, вместо того чтобы ждать ввода, которого не будет.
+# Установка спрашивает то, что нельзя угадать: язык, домен, почту для ACME,
+# режим доступа к панели, режим и домен панели и masquerade. Пароль
+# администратора не спрашивается: он генерируется при установке и печатается
+# один раз в самом конце. Без терминала вопросы не задаются: все ответы должны
+# прийти флагами, иначе скрипт сразу говорит, чего не хватает, вместо того чтобы
+# ждать ввода, которого не будет.
 #
 # На первой установке скрипт обновляет систему (apt update и apt upgrade), а curl
 # ставит сам, если его нет: на свежем минимальном образе его может не быть.
@@ -69,19 +70,79 @@ SKIP_UPGRADE=0
 PASSWORD_MODE=""
 ADMIN_PASSWORD=""
 
+# Язык собственного вывода установщика. По умолчанию русский: локаль сервера на
+# язык не влияет, английский выбирается явно через --lang или первым вопросом.
+LANG_CODE="ru"
+LANG_SET=0
+
+# Режим домена панели и её отдельное имя. Пустой PANEL_MODE до проверки означает
+# «не задан»: после проверки он становится subdomain. Пустой PANEL_DOMAIN — это
+# panel.<домен>, то есть значение по умолчанию, которое не хранится в базе и
+# переезжает вместе с доменом сервера.
+PANEL_MODE=""
+PANEL_DOMAIN=""
+PANEL_HOST=""
+
 TMP=""
 # Временная копия токена Cloudflare: setup читает её от имени службы, а после
 # записи в базу файл удаляется.
 ACME_TOKEN_TMP=""
 
 usage() {
-	cat <<EOF
+	if [ "$LANG_CODE" = "en" ]; then
+		cat <<EOF
+${PRODUCT} installer.
+
+Usage:
+  sh install.sh [flags]
+
+Flags:
+  --lang ru|en           installer language (default: ru)
+  --version VERSION      version from GitHub Releases (default: latest)
+  --debug                allow a self-signed certificate until a real one exists
+  --no-debug             do not allow a self-signed certificate
+  --yes                  do not ask for confirmation before installing
+  --skip-upgrade         do not upgrade the system before installing
+  --help                 show this help
+
+Installer answers:
+  --domain NAME          server domain, for example example.com
+  --email ADDRESS        e-mail for ACME
+  --acme-mode MODE       http (port 80) or dns (TXT record at the DNS provider)
+  --acme-directory URL   ACME directory URL (default: Let's Encrypt)
+  --acme-dns-provider P  DNS provider: hook or cloudflare
+  --acme-dns-hook FILE   executable program for TXT records in dns mode
+  --acme-dns-token-file F file with a Cloudflare API token
+                         (Zone.DNS Edit; Zone.Zone Read is also needed to find the zone)
+  --acme-dns-zone-id ID  Cloudflare zone ID (optional)
+  --access MODE          tunnel (SSH tunnel) or public (from outside)
+  --panel-mode MODE      panel domain: server or subdomain (default: subdomain)
+  --panel-domain NAME    separate panel domain; implies subdomain
+  --masquerade MODE      off, file or proxy
+  --masquerade-file DIR  site directory for file mode
+  --masquerade-proxy URL mirror URL for proxy mode
+  --password-file FILE   use your own administrator password
+  --generate-password    kept for compatibility: the password is always generated
+
+With a terminal the script asks for missing answers and shows them before
+installing. Without a terminal all answers are required; the password is
+generated and printed once at the end. On the first install it runs apt update
+and apt upgrade -y; --skip-upgrade skips this step.
+
+Running it again on a configured panel does not touch the database or the
+installer answers: only the binary, unit and certificate mode are updated.
+
+Run the script as root on Ubuntu LTS or Debian 12/13.
+EOF
+	else
+		cat <<EOF
 Установщик ${PRODUCT}.
 
 Использование:
   sh install.sh [флаги]
 
 Флаги:
+  --lang ru|en           язык установщика (по умолчанию ru)
   --version ВЕРСИЯ       версия из GitHub Releases (по умолчанию latest)
   --debug                разрешить самоподписанный сертификат, пока настоящего нет
   --no-debug             не разрешать самоподписанный сертификат
@@ -100,6 +161,8 @@ usage() {
                          (Zone.DNS Edit; для поиска зоны ещё Zone.Zone Read)
   --acme-dns-zone-id ID  идентификатор зоны Cloudflare (необязательно)
   --access РЕЖИМ         tunnel (SSH-туннель) или public (снаружи)
+  --panel-mode РЕЖИМ     домен панели: server или subdomain (по умолчанию subdomain)
+  --panel-domain ИМЯ     отдельный домен панели; подразумевает subdomain
   --masquerade РЕЖИМ     off, file или proxy
   --masquerade-file КАТ  каталог сайта для file
   --masquerade-proxy URL адрес зеркала для proxy
@@ -116,26 +179,267 @@ usage() {
 
 Скрипт нужно запускать от root на Ubuntu LTS или Debian 12/13.
 EOF
+	fi
+}
+
+# MESSAGES_EN — английский каталог. Ключ — русская строка, которую печатает
+# установщик; значение — её перевод. Русский каталог не нужен: русские строки и
+# есть исходный текст. Совпадение ищется по самому длинному префиксу, поэтому
+# одна запись переводит и сообщение с переменной в конце. Динамические значения
+# остаются аргументами printf, а не подставляются в текст через eval.
+MESSAGES_EN=$(cat <<'EOF'
+внимание|warning
+ошибка|error
+Пароль администратора (сохраните):|Administrator password (save it):
+Домен сервера (например example.com):|Server domain (for example example.com):
+E-mail для ACME:|E-mail for ACME:
+Способ проверки ACME (http — порт 80, dns — TXT у DNS-провайдера) [http]:|ACME challenge (http — port 80, dns — TXT at the DNS provider) [http]:
+DNS-провайдер (hook — своя программа, cloudflare — API) [hook]:|DNS provider (hook — your own program, cloudflare — API) [hook]:
+Программа-хук для записей TXT:|Program hook for TXT records:
+Файл с API-токеном Cloudflare (право Zone.DNS Edit):|File with a Cloudflare API token (Zone.DNS Edit permission):
+Идентификатор зоны Cloudflare (необязательно, Enter — искать по домену):|Cloudflare zone ID (optional, Enter — find by domain):
+Режим доступа к панели (tunnel — SSH-туннель, public — снаружи) [tunnel]:|Panel access (tunnel — SSH tunnel, public — from outside) [tunnel]:
+Режим домена панели (server — домен сервера, subdomain — отдельное имя) [subdomain]:|Panel domain mode (server — server domain, subdomain — separate name) [subdomain]:
+Домен панели (Enter — panel.<домен>):|Panel domain (Enter — panel.<domain>):
+Masquerade (off — выключен, file — свой сайт, proxy — зеркало) [off]:|Masquerade (off — disabled, file — your site, proxy — mirror) [off]:
+Каталог сайта для masquerade:|Site directory for masquerade:
+Адрес зеркала (http:// или https://):|Mirror URL (http:// or https://):
+Продолжить установку? [y/N]:|Continue installation? [y/N]:
+ввод домена оборван|domain input interrupted
+ввод e-mail оборван|e-mail input interrupted
+ввод способа проверки ACME оборван|ACME challenge input interrupted
+ввод DNS-провайдера оборван|DNS provider input interrupted
+ввод хука DNS оборван|DNS hook input interrupted
+ввод файла с токеном Cloudflare оборван|Cloudflare token file input interrupted
+ввод идентификатора зоны Cloudflare оборван|Cloudflare zone ID input interrupted
+ввод режима доступа оборван|access mode input interrupted
+ввод режима домена панели оборван|panel domain mode input interrupted
+ввод домена панели оборван|panel domain input interrupted
+ввод режима masquerade оборван|masquerade mode input interrupted
+ввод каталога сайта оборван|site directory input interrupted
+ввод адреса зеркала оборван|mirror URL input interrupted
+подтверждение не получено|confirmation not received
+нужно имя вида example.com, без схемы, пути и порта|a name like example.com is required, without scheme, path or port
+нужен полный адрес вида name@example.com|a full address like name@example.com is required
+способ проверки ACME: http или dns|ACME challenge: http or dns
+DNS-провайдер: hook или cloudflare|DNS provider: hook or cloudflare
+нужен путь к исполняемой программе|an executable program path is required
+токен читается из файла, чтобы не попасть в историю оболочки|the token is read from a file so it does not end up in shell history
+режим доступа: tunnel или public|access mode: tunnel or public
+режим домена панели: server или subdomain|panel domain mode: server or subdomain
+домен панели должен быть в том же базовом домене|the panel domain must be in the same registrable domain
+домен панели должен отличаться от домена сервера|the panel domain must differ from the server domain
+публичная панель не может жить на домене сервера|a public panel cannot live on the server domain
+masquerade: off, file или proxy|masquerade: off, file or proxy
+адрес зеркала должен начинаться с http:// или https://|the mirror URL must start with http:// or https://
+панель уже настроена: ответы конфигуратора не применяются|the panel is already configured: installer answers are not applied
+отменено|cancelled
+ввод языка оборван|language input interrupted
+Будет установлено:|The following will be installed:
+домен:|domain:
+домен панели:|panel domain:
+e-mail ACME:|ACME e-mail:
+сертификат:|certificate:
+панель:|panel:
+masquerade:|masquerade:
+пароль:|password:
+SSH-туннель|SSH tunnel
+публичный|public
+хук|hook
+каталог|directory
+будет сгенерирован и показан в конце|will be generated and shown at the end
+из файла|from file
+задан|set
+server (домен сервера)|server (server domain)
+subdomain|subdomain
+DNS: создайте A-записи:|DNS: create A records:
+DNS-01: провайдер должен обслуживать обе зоны.|DNS-01: the provider must serve both zones.
+HTTP-01: обе записи должны указывать на этот сервер, порт 80 свободен.|HTTP-01: both records must point to this server and port 80 must be free.
+нужно имя вида panel.example.com, без схемы, пути и порта|a name like panel.example.com is required, without scheme, path or port
+в режиме server домен панели не задаётся: он совпадает с доменом сервера|in server mode the panel domain is not set: it matches the server domain
+публичная панель не может жить на домене сервера: выберите subdomain|a public panel cannot live on the server domain: choose subdomain
+домен панели должен быть вида panel.example.com:|the panel domain must look like panel.example.com:
+домен панели должен быть в том же базовом домене, что и|the panel domain must be in the same registrable domain as
+режим домена панели: server или subdomain, получено:|panel domain mode: server or subdomain, got:
+домен должен быть вида example.com, без схемы, пути и порта:|the domain must look like example.com, without scheme, path or port:
+e-mail должен быть полным адресом вида name@example.com:|the e-mail must be a full address like name@example.com:
+система:|system:
+обновляю систему: apt update и apt upgrade|updating the system: apt update and apt upgrade
+ставлю зависимости:|installing dependencies:
+завожу группу|creating group
+завожу пользователя|creating user
+раскладываю каталоги|creating directories
+скачиваю|downloading
+распаковываю|unpacking
+проверяю ответы конфигуратора|validating installer answers
+бинарь уже тот же, оставляю|the binary is already the same, keeping it
+ставлю бинарь|installing binary
+systemd-юнит уже тот же, оставляю|the systemd unit is already the same, keeping it
+ставлю systemd-юнит|installing systemd unit
+сохраняю настройки|saving settings
+временный режим уже включён, оставляю|temporary mode is already enabled, keeping it
+настоящего сертификата ещё нет: панель поднимется с самоподписанным|there is no real certificate yet: the panel will start with a self-signed one
+настоящий сертификат найден, выключаю временный режим|a real certificate was found, disabling temporary mode
+перезапускаю службу|restarting the service
+запускаю службу|starting the service
+готово|done
+служба не запустилась|the service did not start
+Способ проверки:|Challenge:
+Настройки ACME сохранены при установке.|ACME settings were saved during installation.
+Панель уже настроена: адрес и сертификат не менялись.|The panel is already configured: its address and certificate were not changed.
+Панель слушает 8443 на всех интерфейсах:|The panel listens on 8443 on all interfaces:
+после выпуска сертификата.|after the certificate is issued.
+Панель спрятана на петле. Проброс:|The panel is hidden on the loopback. Forward the port:
+Открыть:|Open:
+Имя сертификата:|Certificate name:
+Для DNS-01 панель создаёт TXT-запись через Cloudflare. Токен уже в базе: файл с ним можно удалить.|For DNS-01 the panel creates a TXT record through Cloudflare. The token is already in the database: the file can be deleted.
+Для DNS-01 панель вызывает указанный хук; он должен оставаться доступен службе.|For DNS-01 the panel calls the configured hook; it must remain available to the service.
+Для HTTP-01 домен должен указывать на этот сервер, а порт 80 быть свободен.|For HTTP-01 the domain must point to this server and port 80 must be free.
+нужны права root:|root is required:
+не найден /etc/os-release: не удалось определить дистрибутив|/etc/os-release not found: cannot determine the distribution
+Ubuntu не поддерживается: нужен LTS 20.04, 22.04, 24.04 или 26.04|Ubuntu is not supported: LTS 20.04, 22.04, 24.04 or 26.04 is required
+Debian не поддерживается: нужны Debian 12 или 13|Debian is not supported: Debian 12 or 13 is required
+дистрибутив не поддерживается: нужны Ubuntu LTS или Debian 12/13|the distribution is not supported: Ubuntu LTS or Debian 12/13 is required
+архитектура не поддерживается: нужны x86_64 или aarch64|the architecture is not supported: x86_64 or aarch64 is required
+systemd не запущен: установка рассчитана на systemd-сервер|systemd is not running: this installer targets a systemd server
+не найден systemctl|systemctl not found
+не найден runuser: нужен пакет util-linux|runuser not found: the util-linux package is required
+не найден curl: установите его командой apt-get install -y curl|curl not found: install it with apt-get install -y curl
+не найден sha256sum: установите пакет coreutils|sha256sum not found: install the coreutils package
+нет терминала: укажите ответы конфигуратора:|no terminal: provide the installer answers:
+(см. --help)|(see --help)
+не удалось обновить список пакетов|could not update the package list
+не удалось обновить систему|could not upgrade the system
+не удалось поставить зависимости|could not install dependencies
+не удалось подготовить файл с токеном Cloudflare|could not prepare the Cloudflare token file
+каталог сайта|site directory
+недоступен пользователю|is not accessible to user
+нужны права на чтение и проход|read and execute permissions are required
+файл с токеном Cloudflare|Cloudflare token file
+хук DNS|DNS hook
+нужен исполняемый файл|an executable file is required
+не удалось создать временный каталог|could not create a temporary directory
+не удалось скачать|could not download
+в checksums.txt нет строки для|checksums.txt has no line for
+контрольная сумма|checksum
+не сошлась: ожидалась|does not match: expected
+получена|got
+не удалось распаковать|could not unpack
+в архиве нет|the archive has no
+скачанный бинарь не запускается|the downloaded binary does not start
+в архиве бинарь для другой платформы:|the archive contains a binary for another platform:
+в релизе оказалась отладочная сборка|the release contains a debug build
+в архиве версия|the archive contains version
+ожидалась|expected
+ответы конфигуратора не прошли проверку|installer answers failed validation
+не удалось сохранить настройки|could not save settings
+не удалось получить сгенерированный пароль администратора|could not get the generated administrator password
+не задан пароль администратора|administrator password is not set
+не удалось включить службу|could not enable the service
+не задан --password-file|--password-file is not set
+файла с паролем нет:|password file not found:
+файл с паролем не читается:|password file is not readable:
+файл с паролем пуст:|password file is empty:
+пустой пароль администратора|empty administrator password
+пароль администратора не должен совпадать с паролем по умолчанию admin|the administrator password must not match the default password admin
+для проверки ACME http не нужны настройки DNS|ACME http does not need DNS settings
+для проверки ACME dns с хуком нужен --acme-dns-hook|ACME dns with a hook requires --acme-dns-hook
+для DNS-01 с хуком не нужны настройки Cloudflare|DNS-01 with a hook does not need Cloudflare settings
+хук DNS должен быть исполняемым файлом:|the DNS hook must be an executable file:
+для DNS-01 Cloudflare нужен --acme-dns-token-file|DNS-01 Cloudflare requires --acme-dns-token-file
+для DNS-01 Cloudflare не нужен --acme-dns-hook|DNS-01 Cloudflare does not need --acme-dns-hook
+файла с токеном Cloudflare нет:|Cloudflare token file not found:
+файл с токеном Cloudflare не читается:|Cloudflare token file is not readable:
+DNS-провайдер: hook или cloudflare, получено:|DNS provider: hook or cloudflare, got:
+способ проверки ACME: http или dns, получено:|ACME challenge: http or dns, got:
+адрес ACME-каталога должен начинаться с http:// или https://:|the ACME directory URL must start with http:// or https://:
+режим доступа: tunnel или public, получено:|access mode: tunnel or public, got:
+для masquerade off не нужны --masquerade-file и --masquerade-proxy|masquerade off does not need --masquerade-file or --masquerade-proxy
+для masquerade file нужен --masquerade-file|masquerade file requires --masquerade-file
+для masquerade file не нужен --masquerade-proxy|masquerade file does not need --masquerade-proxy
+каталога сайта|site directory
+каталога сайта нет:|site directory not found:
+каталог сайта недоступен пользователю|site directory is not accessible to user
+файл с токеном Cloudflare недоступен пользователю|Cloudflare token file is not accessible to user
+хук DNS недоступен пользователю|DNS hook is not accessible to user
+каталога нет:|directory not found:
+masquerade file отдаёт файлы из существующего каталога|masquerade file serves files from an existing directory
+нет|not found
+для masquerade proxy нужен --masquerade-proxy|masquerade proxy requires --masquerade-proxy
+для masquerade proxy не нужен --masquerade-file|masquerade proxy does not need --masquerade-file
+адрес зеркала должен начинаться с http:// или https://:|the mirror URL must start with http:// or https://:
+masquerade: off, file или proxy, получено:|masquerade: off, file or proxy, got:
+не задан пароль администратора: нужен --password-file или --generate-password|administrator password is not set: use --password-file or --generate-password
+после --lang нужен ru или en|--lang requires ru or en
+язык: ru или en, получено:|language: ru or en, got:
+после --panel-mode нужен server или subdomain|--panel-mode requires server or subdomain
+после --panel-domain нужен домен|--panel-domain requires a domain
+неизвестный аргумент:|unknown argument:
+версия должна выглядеть как v0.1.0 или latest, получено:|the version must look like v0.1.0 or latest, got:
+после --version нужна версия|--version requires a version
+после --domain нужен домен|--domain requires a domain
+после --email нужен адрес|--email requires an address
+после --acme-mode нужен режим|--acme-mode requires a mode
+после --acme-directory нужен адрес|--acme-directory requires a URL
+после --acme-dns-provider нужен провайдер|--acme-dns-provider requires a provider
+после --acme-dns-hook нужен путь|--acme-dns-hook requires a path
+после --acme-dns-token-file нужен путь|--acme-dns-token-file requires a path
+после --acme-dns-zone-id нужен идентификатор|--acme-dns-zone-id requires an ID
+после --access нужен режим|--access requires a mode
+после --masquerade нужен режим|--masquerade requires a mode
+после --masquerade-file нужен каталог|--masquerade-file requires a directory
+после --masquerade-proxy нужен адрес|--masquerade-proxy requires a URL
+после --password-file нужен путь|--password-file requires a path
+пароль задаётся либо --password-file, либо --generate-password|the password is set by either --password-file or --generate-password
+EOF
+)
+
+# translate переводит строку установщика на выбранный язык. Русский — исходный,
+# поэтому для него возвращается та же строка.
+translate() {
+	if [ "$LANG_CODE" != "en" ]; then
+		printf '%s' "$1"
+		return
+	fi
+
+	printf '%s\n' "$MESSAGES_EN" | awk -F '|' -v text="$1" '
+		{
+			key = $1
+			value = $0
+			sub(/^[^|]*\|/, "", value)
+			if (index(text, key) == 1 && length(key) > best) {
+				best = length(key)
+				best_value = value
+			}
+		}
+		END {
+			if (best > 0) {
+				printf "%s%s", best_value, substr(text, best + 1)
+			} else {
+				printf "%s", text
+			}
+		}
+	'
 }
 
 info() {
-	printf '==> %s\n' "$*"
+	printf '==> %s\n' "$(translate "$*")"
 }
 
 warn() {
-	printf 'внимание: %s\n' "$*" >&2
+	printf '%s: %s\n' "$(translate 'внимание')" "$(translate "$*")" >&2
 }
 
 # print_generated_password напоминает пароль, если он уже записан в базу. Вывод
 # идёт в stderr: это подсказка при сбое, а не часть успешного результата.
 print_generated_password() {
 	if [ "${PASSWORD_MODE:-}" = "generate" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
-		printf '\nПароль администратора (сохраните): %s\n' "$ADMIN_PASSWORD" >&2
+		printf '\n%s %s\n' "$(translate 'Пароль администратора (сохраните):')" "$ADMIN_PASSWORD" >&2
 	fi
 }
 
 die() {
-	printf 'ошибка: %s\n' "$*" >&2
+	printf '%s: %s\n' "$(translate 'ошибка')" "$(translate "$*")" >&2
 
 	# Если сбой случился после записи базы, пароль уже действует. Показываем его
 	# и здесь: иначе установка сломалась бы ровно в тот момент, когда доступ
@@ -188,7 +492,7 @@ trap 'exit 1' HUP INT TERM
 
 ask_domain() {
 	while :; do
-		printf 'Домен сервера (например example.com): ' >&2
+		printf '%s ' "$(translate 'Домен сервера (например example.com):')" >&2
 		if ! IFS= read -r DOMAIN; then
 			die "ввод домена оборван"
 		fi
@@ -204,7 +508,7 @@ ask_domain() {
 
 ask_email() {
 	while :; do
-		printf 'E-mail для ACME: ' >&2
+		printf '%s ' "$(translate 'E-mail для ACME:')" >&2
 		if ! IFS= read -r ACME_EMAIL; then
 			die "ввод e-mail оборван"
 		fi
@@ -220,7 +524,7 @@ ask_email() {
 
 ask_acme_mode() {
 	while :; do
-		printf 'Способ проверки ACME (http — порт 80, dns — TXT у DNS-провайдера) [http]: ' >&2
+		printf '%s ' "$(translate 'Способ проверки ACME (http — порт 80, dns — TXT у DNS-провайдера) [http]:')" >&2
 		if ! IFS= read -r ACME_MODE; then
 			die "ввод способа проверки ACME оборван"
 		fi
@@ -237,7 +541,7 @@ ask_acme_mode() {
 
 ask_acme_dns_provider() {
 	while :; do
-		printf 'DNS-провайдер (hook — своя программа, cloudflare — API) [hook]: ' >&2
+		printf '%s ' "$(translate 'DNS-провайдер (hook — своя программа, cloudflare — API) [hook]:')" >&2
 		if ! IFS= read -r ACME_DNS_PROVIDER; then
 			die "ввод DNS-провайдера оборван"
 		fi
@@ -254,7 +558,7 @@ ask_acme_dns_provider() {
 
 ask_acme_dns_hook() {
 	while :; do
-		printf 'Программа-хук для записей TXT: ' >&2
+		printf '%s ' "$(translate 'Программа-хук для записей TXT:')" >&2
 		if ! IFS= read -r ACME_DNS_HOOK; then
 			die "ввод хука DNS оборван"
 		fi
@@ -270,7 +574,7 @@ ask_acme_dns_hook() {
 
 ask_acme_dns_token_file() {
 	while :; do
-		printf 'Файл с API-токеном Cloudflare (право Zone.DNS Edit): ' >&2
+		printf '%s ' "$(translate 'Файл с API-токеном Cloudflare (право Zone.DNS Edit):')" >&2
 		if ! IFS= read -r ACME_DNS_TOKEN_FILE; then
 			die "ввод файла с токеном Cloudflare оборван"
 		fi
@@ -285,7 +589,7 @@ ask_acme_dns_token_file() {
 }
 
 ask_acme_dns_zone_id() {
-	printf 'Идентификатор зоны Cloudflare (необязательно, Enter — искать по домену): ' >&2
+	printf '%s ' "$(translate 'Идентификатор зоны Cloudflare (необязательно, Enter — искать по домену):')" >&2
 	if ! IFS= read -r ACME_DNS_ZONE_ID; then
 		die "ввод идентификатора зоны Cloudflare оборван"
 	fi
@@ -295,7 +599,7 @@ ask_acme_dns_zone_id() {
 
 ask_access() {
 	while :; do
-		printf 'Режим доступа к панели (tunnel — SSH-туннель, public — снаружи) [tunnel]: ' >&2
+		printf '%s ' "$(translate 'Режим доступа к панели (tunnel — SSH-туннель, public — снаружи) [tunnel]:')" >&2
 		if ! IFS= read -r PANEL_ACCESS; then
 			die "ввод режима доступа оборван"
 		fi
@@ -310,9 +614,85 @@ ask_access() {
 	done
 }
 
+# ask_language спрашивает язык первым вопросом. Вопрос двуязычный: на этом шаге
+# ещё нет выбранного языка, а `--lang` его уже задал и вопроса не будет.
+ask_language() {
+	[ -t 0 ] || return 0
+	[ "$LANG_SET" -eq 0 ] || return 0
+
+	while :; do
+		printf 'Язык установки / Installation language (ru/en) [ru]: ' >&2
+		if ! IFS= read -r REPLY; then
+			die "ввод языка оборван"
+		fi
+
+		REPLY="$(trim "$REPLY" | tr '[:upper:]' '[:lower:]')"
+		case "$REPLY" in
+		"") LANG_CODE="ru"; return ;;
+		ru|en) LANG_CODE="$REPLY"; return ;;
+		*) printf 'ru / en\n' >&2 ;;
+		esac
+	done
+}
+
+# ask_panel_mode спрашивает, где живёт имя панели. При публичном доступе выбор
+# один: панель не может делить домен с ядром.
+ask_panel_mode() {
+	if [ "$PANEL_ACCESS" = "public" ]; then
+		PANEL_MODE="subdomain"
+		return
+	fi
+
+	while :; do
+		printf '%s ' "$(translate 'Режим домена панели (server — домен сервера, subdomain — отдельное имя) [subdomain]:')" >&2
+		if ! IFS= read -r PANEL_MODE; then
+			die "ввод режима домена панели оборван"
+		fi
+
+		PANEL_MODE="$(trim "$PANEL_MODE" | tr '[:upper:]' '[:lower:]')"
+		[ -n "$PANEL_MODE" ] || PANEL_MODE="subdomain"
+
+		case "$PANEL_MODE" in
+		server|subdomain) return ;;
+		*) warn "режим домена панели: server или subdomain" ;;
+		esac
+	done
+}
+
+# ask_panel_domain спрашивает отдельное имя панели. Пустой ответ — panel.<домен>:
+# это значение не хранится, чтобы панель переезжала вместе с доменом сервера.
+ask_panel_domain() {
+	[ "$PANEL_MODE" = "server" ] && return
+
+	while :; do
+		printf '%s ' "$(translate 'Домен панели (Enter — panel.<домен>):')" >&2
+		if ! IFS= read -r PANEL_DOMAIN; then
+			die "ввод домена панели оборван"
+		fi
+
+		PANEL_DOMAIN="$(trim "$PANEL_DOMAIN" | tr '[:upper:]' '[:lower:]')"
+		if [ -z "$PANEL_DOMAIN" ] || [ "$PANEL_DOMAIN" = "panel.${DOMAIN}" ]; then
+			PANEL_DOMAIN=""
+			return
+		fi
+		if valid_domain "$PANEL_DOMAIN"; then
+			return
+		fi
+
+		warn "нужно имя вида panel.example.com, без схемы, пути и порта"
+	done
+}
+
+# base_domain — приблизительный базовый домен для проверки до скачивания бинаря.
+# Точная проверка по публичному суффиксу живёт в Go; здесь достаточно отсечь
+# очевидно чужой домен, чтобы не идти на установку с заведомо негодной парой.
+base_domain() {
+	printf '%s' "$1" | awk -F. '{ if (NF >= 2) print $(NF-1) "." $NF; else print $0 }'
+}
+
 ask_masquerade() {
 	while :; do
-		printf 'Masquerade (off — выключен, file — свой сайт, proxy — зеркало) [off]: ' >&2
+		printf '%s ' "$(translate 'Masquerade (off — выключен, file — свой сайт, proxy — зеркало) [off]:')" >&2
 		if ! IFS= read -r MASQUERADE; then
 			die "ввод режима masquerade оборван"
 		fi
@@ -337,7 +717,7 @@ ask_masquerade() {
 
 ask_masquerade_file() {
 	while :; do
-		printf 'Каталог сайта для masquerade: ' >&2
+		printf '%s ' "$(translate 'Каталог сайта для masquerade:')" >&2
 		if ! IFS= read -r MASQUERADE_FILE; then
 			die "ввод каталога сайта оборван"
 		fi
@@ -347,13 +727,13 @@ ask_masquerade_file() {
 			return
 		fi
 
-		warn "каталога $MASQUERADE_FILE нет: masquerade file отдаёт файлы из существующего каталога"
+		warn "$(translate 'каталога нет:') $MASQUERADE_FILE — $(translate 'masquerade file отдаёт файлы из существующего каталога')"
 	done
 }
 
 ask_masquerade_proxy() {
 	while :; do
-		printf 'Адрес зеркала (http:// или https://): ' >&2
+		printf '%s ' "$(translate 'Адрес зеркала (http:// или https://):')" >&2
 		if ! IFS= read -r MASQUERADE_PROXY; then
 			die "ввод адреса зеркала оборван"
 		fi
@@ -370,8 +750,8 @@ ask_masquerade_proxy() {
 # show_answers показывает то, что будет записано, до первого изменения в системе.
 show_answers() {
 	case "$PANEL_ACCESS" in
-	tunnel) ACCESS_TEXT="SSH-туннель, 127.0.0.1:8443" ;;
-	public) ACCESS_TEXT="публичный, 0.0.0.0:8443" ;;
+	tunnel) ACCESS_TEXT="$(translate 'SSH-туннель'), 127.0.0.1:8443" ;;
+	public) ACCESS_TEXT="$(translate 'публичный'), 0.0.0.0:8443" ;;
 	esac
 
 	case "$MASQUERADE" in
@@ -384,32 +764,64 @@ show_answers() {
 	dns)
 		case "$ACME_DNS_PROVIDER" in
 		cloudflare) ACME_TEXT="DNS-01, Cloudflare" ;;
-		*) ACME_TEXT="DNS-01, хук ${ACME_DNS_HOOK}" ;;
+		*) ACME_TEXT="DNS-01, $(translate 'хук') ${ACME_DNS_HOOK}" ;;
 		esac
 		;;
 	*) ACME_TEXT="HTTP-01" ;;
 	esac
 	if [ -n "$ACME_DIRECTORY" ]; then
-		ACME_TEXT="${ACME_TEXT}, каталог ${ACME_DIRECTORY}"
+		ACME_TEXT="${ACME_TEXT}, $(translate 'каталог') ${ACME_DIRECTORY}"
 	fi
 
 	case "$PASSWORD_MODE" in
-	generate) PASSWORD_TEXT="будет сгенерирован и показан в конце" ;;
-	file) PASSWORD_TEXT="из файла ${PASSWORD_FILE}" ;;
-	*) PASSWORD_TEXT="задан" ;;
+	generate) PASSWORD_TEXT="$(translate 'будет сгенерирован и показан в конце')" ;;
+	file) PASSWORD_TEXT="$(translate 'из файла') ${PASSWORD_FILE}" ;;
+	*) PASSWORD_TEXT="$(translate 'задан')" ;;
 	esac
 
-	cat >&2 <<EOF
+	if [ "$PANEL_MODE" = "server" ]; then
+		PANEL_MODE_TEXT="$(translate 'server (домен сервера)')"
+	else
+		PANEL_MODE_TEXT="$(translate 'subdomain')"
+	fi
 
-Будет установлено:
-  домен:        ${DOMAIN}
-  e-mail ACME:  ${ACME_EMAIL}
-  сертификат:   ${ACME_TEXT}
-  панель:       ${ACCESS_TEXT}
-  masquerade:   ${MASQUERADE_TEXT}
-  пароль:       ${PASSWORD_TEXT}
+	printf '\n%s\n' "$(translate 'Будет установлено:')" >&2
+	printf '  %-16s %s\n' "$(translate 'домен:')" "$DOMAIN" >&2
+	printf '  %-16s %s\n' "$(translate 'домен панели:')" "$PANEL_HOST" >&2
+	printf '  %-16s %s\n' "$(translate 'e-mail ACME:')" "$ACME_EMAIL" >&2
+	printf '  %-16s %s\n' "$(translate 'сертификат:')" "$ACME_TEXT" >&2
+	printf '  %-16s %s (%s)\n' "$(translate 'панель:')" "$ACCESS_TEXT" "$PANEL_MODE_TEXT" >&2
+	printf '  %-16s %s\n' "$(translate 'masquerade:')" "$MASQUERADE_TEXT" >&2
+	printf '  %-16s %s\n' "$(translate 'пароль:')" "$PASSWORD_TEXT" >&2
+	printf '\n' >&2
+}
 
-EOF
+# show_dns печатает A-записи, которые нужны до выпуска сертификата. Проверять
+# DNS блокирующе нельзя: запись могли создать только что, и установка не должна
+# ждать распространения. Поэтому здесь только напоминание с адресом сервера.
+show_dns() {
+	SERVER_IP=""
+	if command -v ip >/dev/null 2>&1; then
+		SERVER_IP="$(ip -4 route get 1.1.1.1 2>/dev/null |
+			awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+	fi
+	[ -n "$SERVER_IP" ] || SERVER_IP="<IPv4>"
+
+	printf '%s\n' "$(translate 'DNS: создайте A-записи:')" >&2
+	printf '  %-32s A  %s\n' "$DOMAIN" "$SERVER_IP" >&2
+	if [ "$PANEL_HOST" != "$DOMAIN" ]; then
+		printf '  %-32s A  %s\n' "$PANEL_HOST" "$SERVER_IP" >&2
+	fi
+
+	case "$ACME_MODE" in
+	dns)
+		printf '%s\n' "$(translate 'DNS-01: провайдер должен обслуживать обе зоны.')" >&2
+		;;
+	*)
+		printf '%s\n' "$(translate 'HTTP-01: обе записи должны указывать на этот сервер, порт 80 свободен.')" >&2
+		;;
+	esac
+	printf '\n' >&2
 }
 
 # validate_answers проверяет всё, что можно проверить до изменений. Ошибка здесь
@@ -484,6 +896,39 @@ validate_answers() {
 	*) die "режим доступа: tunnel или public, получено: $PANEL_ACCESS" ;;
 	esac
 
+	PANEL_MODE="$(trim "$PANEL_MODE" | tr '[:upper:]' '[:lower:]')"
+	PANEL_DOMAIN="$(trim "$PANEL_DOMAIN" | tr '[:upper:]' '[:lower:]')"
+	[ -n "$PANEL_MODE" ] || PANEL_MODE="subdomain"
+
+	case "$PANEL_MODE" in
+	server|subdomain) ;;
+	*) die "режим домена панели: server или subdomain, получено: $PANEL_MODE" ;;
+	esac
+
+	if [ "$PANEL_MODE" = "server" ]; then
+		[ -z "$PANEL_DOMAIN" ] ||
+			die "в режиме server домен панели не задаётся: он совпадает с доменом сервера"
+		[ "$PANEL_ACCESS" != "public" ] ||
+			die "публичная панель не может жить на домене сервера: выберите subdomain"
+		PANEL_HOST="$DOMAIN"
+	else
+		if [ -z "$PANEL_DOMAIN" ] || [ "$PANEL_DOMAIN" = "panel.${DOMAIN}" ]; then
+			# Пустой Domain — это «panel.<домен>»: значение по умолчанию не
+			# хранится, поэтому смена домена сервера переносит и панель.
+			PANEL_DOMAIN=""
+			PANEL_HOST="panel.${DOMAIN}"
+		else
+			valid_domain "$PANEL_DOMAIN" ||
+				die "домен панели должен быть вида panel.example.com: $PANEL_DOMAIN"
+			PANEL_HOST="$PANEL_DOMAIN"
+		fi
+
+		[ "$PANEL_HOST" != "$DOMAIN" ] ||
+			die "домен панели должен отличаться от домена сервера: $PANEL_HOST"
+		[ "$(base_domain "$DOMAIN")" = "$(base_domain "$PANEL_HOST")" ] ||
+			die "домен панели должен быть в том же базовом домене, что и $DOMAIN: $PANEL_HOST"
+	fi
+
 	case "$MASQUERADE" in
 	off)
 		[ -z "$MASQUERADE_FILE" ] && [ -z "$MASQUERADE_PROXY" ] ||
@@ -495,7 +940,7 @@ validate_answers() {
 		[ -z "$MASQUERADE_PROXY" ] ||
 			die "для masquerade file не нужен --masquerade-proxy"
 		[ -d "$MASQUERADE_FILE" ] ||
-			die "каталога сайта $MASQUERADE_FILE нет"
+			die "$(translate 'каталога сайта нет:') $MASQUERADE_FILE"
 		;;
 	proxy)
 		[ -n "$MASQUERADE_PROXY" ] ||
@@ -540,10 +985,14 @@ run_setup() (
 	runner="${3:-}"
 
 	set -- setup --db "$DB" --domain "$DOMAIN" --email "$ACME_EMAIL" \
-		--access "$PANEL_ACCESS" --masquerade "$MASQUERADE" \
+		--access "$PANEL_ACCESS" --panel-mode "$PANEL_MODE" \
+		--masquerade "$MASQUERADE" \
 		--acme-mode "$ACME_MODE" \
 		--cert "$CERT" --key "$KEY"
 
+	if [ -n "$PANEL_DOMAIN" ]; then
+		set -- "$@" --panel-domain "$PANEL_DOMAIN"
+	fi
 	if [ -n "$ACME_DIRECTORY" ]; then
 		set -- "$@" --acme-directory "$ACME_DIRECTORY"
 	fi
@@ -581,8 +1030,58 @@ run_setup() (
 	fi
 )
 
+# --lang разбирается до --help: иначе `install.sh --help --lang en` напечатал бы
+# русскую справку. Отдельный проход не меняет позиционные параметры — их
+# разбирает основной цикл ниже.
+LANG_ARG=""
+LANG_ARG_SET=0
+LANG_PENDING=0
+for arg in "$@"; do
+	if [ "$LANG_PENDING" -eq 1 ]; then
+		LANG_ARG="$arg"
+		LANG_ARG_SET=1
+		LANG_PENDING=0
+		continue
+	fi
+
+	case "$arg" in
+	--lang)
+		LANG_PENDING=1
+		;;
+	--lang=*)
+		LANG_ARG="${arg#*=}"
+		LANG_ARG_SET=1
+		;;
+	esac
+done
+if [ "$LANG_PENDING" -eq 1 ]; then
+	die "после --lang нужен ru или en"
+fi
+if [ "$LANG_ARG_SET" -eq 1 ]; then
+	case "$LANG_ARG" in
+	ru|en)
+		LANG_CODE="$LANG_ARG"
+		LANG_SET=1
+		;;
+	*)
+		die "язык: ru или en, получено: $LANG_ARG"
+		;;
+	esac
+fi
+
 while [ "$#" -gt 0 ]; do
 	case "$1" in
+	--lang)
+		[ "$#" -ge 2 ] || die "после --lang нужен ru или en"
+		LANG_CODE="$2"
+		LANG_SET=1
+		shift 2
+		;;
+	--lang=*)
+		LANG_CODE="${1#*=}"
+		LANG_SET=1
+		shift
+		;;
 	--version)
 		[ "$#" -ge 2 ] || die "после --version нужна версия"
 		TARGET_VERSION="$2"
@@ -689,6 +1188,24 @@ while [ "$#" -gt 0 ]; do
 		PANEL_ACCESS="${1#*=}"
 		shift
 		;;
+	--panel-mode)
+		[ "$#" -ge 2 ] || die "после --panel-mode нужен server или subdomain"
+		PANEL_MODE="$2"
+		shift 2
+		;;
+	--panel-mode=*)
+		PANEL_MODE="${1#*=}"
+		shift
+		;;
+	--panel-domain)
+		[ "$#" -ge 2 ] || die "после --panel-domain нужен домен"
+		PANEL_DOMAIN="$2"
+		shift 2
+		;;
+	--panel-domain=*)
+		PANEL_DOMAIN="${1#*=}"
+		shift
+		;;
 	--masquerade)
 		[ "$#" -ge 2 ] || die "после --masquerade нужен режим"
 		MASQUERADE="$2"
@@ -734,7 +1251,7 @@ while [ "$#" -gt 0 ]; do
 		exit 0
 		;;
 	*)
-		die "неизвестный аргумент: $1 (см. --help)"
+		die "неизвестный аргумент: $1 (--help)"
 		;;
 	esac
 done
@@ -751,6 +1268,10 @@ else
 fi
 
 [ "$(id -u)" -eq 0 ] || die "нужны права root: sudo sh $0"
+
+# Язык — до первого информационного сообщения и до вопросов конфигуратора.
+# --yes его не пропускает: это не подтверждение установки, а выбор языка.
+ask_language
 
 # --- что за система ---------------------------------------------------------
 
@@ -772,24 +1293,24 @@ case "$OS_ID" in
 ubuntu)
 	case "$OS_VERSION" in
 	20.04|22.04|24.04|26.04) ;;
-	*) die "Ubuntu $OS_VERSION не поддерживается: нужен LTS 20.04, 22.04, 24.04 или 26.04" ;;
+	*) die "$(translate 'Ubuntu не поддерживается: нужен LTS 20.04, 22.04, 24.04 или 26.04') ($OS_VERSION)" ;;
 	esac
 	;;
 debian)
 	case "$OS_VERSION" in
 	12|12.*|13|13.*) ;;
-	*) die "Debian $OS_VERSION не поддерживается: нужны Debian 12 или 13" ;;
+	*) die "$(translate 'Debian не поддерживается: нужны Debian 12 или 13') ($OS_VERSION)" ;;
 	esac
 	;;
 *)
-	die "дистрибутив $OS_NAME не поддерживается: нужны Ubuntu LTS или Debian 12/13"
+	die "$(translate 'дистрибутив не поддерживается: нужны Ubuntu LTS или Debian 12/13') ($OS_NAME)"
 	;;
 esac
 
 case "$(uname -m)" in
 x86_64|amd64) ARCH="amd64" ;;
 aarch64|arm64) ARCH="arm64" ;;
-*) die "архитектура $(uname -m) не поддерживается: нужны x86_64 или aarch64" ;;
+*) die "$(translate 'архитектура не поддерживается: нужны x86_64 или aarch64') ($(uname -m))" ;;
 esac
 
 [ -d /run/systemd/system ] || die "systemd не запущен: установка рассчитана на systemd-сервер"
@@ -834,6 +1355,19 @@ else
 	if [ "$INTERACTIVE" -eq 1 ]; then
 		[ -n "$DOMAIN" ] || ask_domain
 		[ -n "$ACME_EMAIL" ] || ask_email
+		[ -n "$PANEL_ACCESS" ] || ask_access
+
+		# Доступ спрашивается раньше панели: при public режим server
+		# недоступен, и вопрос о нём не задаётся. Явный --panel-domain уже
+		# означает subdomain и вопроса о режиме не требует.
+		if [ -z "$PANEL_MODE" ] && [ -n "$PANEL_DOMAIN" ]; then
+			PANEL_MODE="subdomain"
+		fi
+		[ -n "$PANEL_MODE" ] || ask_panel_mode
+		if [ -z "$PANEL_DOMAIN" ] && [ "$PANEL_MODE" != "server" ]; then
+			ask_panel_domain
+		fi
+
 		[ -n "$ACME_MODE" ] || ask_acme_mode
 
 		if [ "$ACME_MODE" = "dns" ]; then
@@ -847,7 +1381,6 @@ else
 			esac
 		fi
 
-		[ -n "$PANEL_ACCESS" ] || ask_access
 		[ -n "$MASQUERADE" ] || ask_masquerade
 
 		if [ "$MASQUERADE" = "file" ] && [ -z "$MASQUERADE_FILE" ]; then
@@ -868,9 +1401,10 @@ else
 
 	validate_answers
 	show_answers
+	show_dns
 
 	if [ "$INTERACTIVE" -eq 1 ] && [ "$ASSUME_YES" -eq 0 ]; then
-		printf 'Продолжить установку? [y/N]: ' >&2
+		printf '%s ' "$(translate 'Продолжить установку? [y/N]:')" >&2
 		if ! IFS= read -r REPLY; then
 			die "подтверждение не получено"
 		fi
@@ -992,7 +1526,7 @@ fi
 if [ "$CONFIGURED" -eq 0 ] && [ "$MASQUERADE" = "file" ]; then
 	if ! runuser -u "$SERVICE_USER" -- test -r "$MASQUERADE_FILE" ||
 		! runuser -u "$SERVICE_USER" -- test -x "$MASQUERADE_FILE"; then
-		die "каталог сайта $MASQUERADE_FILE недоступен пользователю $SERVICE_USER: нужны права на чтение и проход"
+		die "$(translate 'каталог сайта недоступен пользователю') $SERVICE_USER: $MASQUERADE_FILE — $(translate 'нужны права на чтение и проход')"
 	fi
 fi
 
@@ -1002,12 +1536,12 @@ if [ "$CONFIGURED" -eq 0 ] && [ "$ACME_MODE" = "dns" ]; then
 	case "$ACME_DNS_PROVIDER" in
 	cloudflare)
 		if ! runuser -u "$SERVICE_USER" -- test -r "$ACME_DNS_TOKEN_FILE"; then
-			die "файл с токеном Cloudflare $ACME_DNS_TOKEN_FILE недоступен пользователю $SERVICE_USER"
+			die "$(translate 'файл с токеном Cloudflare недоступен пользователю') $SERVICE_USER: $ACME_DNS_TOKEN_FILE"
 		fi
 		;;
 	*)
 		if ! runuser -u "$SERVICE_USER" -- test -x "$ACME_DNS_HOOK"; then
-			die "хук DNS $ACME_DNS_HOOK недоступен пользователю $SERVICE_USER: нужен исполняемый файл"
+			die "$(translate 'хук DNS недоступен пользователю') $SERVICE_USER: $ACME_DNS_HOOK — $(translate 'нужен исполняемый файл')"
 		fi
 		;;
 	esac
@@ -1119,19 +1653,20 @@ if [ "$CONFIGURED" -eq 0 ]; then
 
 	case "$PASSWORD_MODE" in
 	stdin|file)
-		printf '%s\n' "$ADMIN_PASSWORD" | run_setup "$BIN" stdin service ||
+		# Сводка setup не печатается: у установщика свой локализованный итог, а
+		# смешивать русский вывод setup с английским установщиком нельзя.
+		printf '%s\n' "$ADMIN_PASSWORD" | run_setup "$BIN" stdin service >/dev/null ||
 			die "не удалось сохранить настройки"
 		;;
 	generate)
 		# Пароль печатается не здесь, а в самом конце: в длинном выводе
-		# обновления и запуска его легко не заметить. Пока держим его в
-		# переменной и убираем из промежуточного вывода.
+		# обновления и запуска его легко не заметить. Сводку setup не печатаем
+		# по той же причине, что и выше; из неё нужна только строка с паролем.
 		SETUP_OUT="$(run_setup "$BIN" generate service)" ||
 			die "не удалось сохранить настройки"
 		ADMIN_PASSWORD="$(printf '%s\n' "$SETUP_OUT" | sed -n 's/^пароль администратора: //p')"
 		[ -n "$ADMIN_PASSWORD" ] ||
 			die "не удалось получить сгенерированный пароль администратора"
-		printf '%s\n' "$SETUP_OUT" | sed '/^пароль администратора: /d'
 		;;
 	*)
 		die "не задан пароль администратора"
@@ -1256,42 +1791,73 @@ fi
 # --- итог ------------------------------------------------------------------
 
 if [ "$CONFIGURED" -eq 0 ]; then
-	CERT_SUMMARY="Способ проверки: ${ACME_TEXT}."
+	CERT_SUMMARY="$(translate 'Способ проверки:') ${ACME_TEXT}."
 	case "$ACME_MODE" in
 	dns)
 		case "$ACME_DNS_PROVIDER" in
 		cloudflare)
-			ACME_NOTE="Для DNS-01 панель создаёт TXT-запись через Cloudflare. Токен уже в базе: файл с ним можно удалить."
+			ACME_NOTE="$(translate 'Для DNS-01 панель создаёт TXT-запись через Cloudflare. Токен уже в базе: файл с ним можно удалить.')"
 			;;
 		*)
-			ACME_NOTE="Для DNS-01 панель вызывает указанный хук; он должен оставаться доступен службе."
+			ACME_NOTE="$(translate 'Для DNS-01 панель вызывает указанный хук; он должен оставаться доступен службе.')"
 			;;
 		esac
 		;;
 	*)
-		ACME_NOTE="Для HTTP-01 домен должен указывать на этот сервер, а порт 80 быть свободен."
+		ACME_NOTE="$(translate 'Для HTTP-01 домен должен указывать на этот сервер, а порт 80 быть свободен.')"
 		;;
 	esac
 else
-	CERT_SUMMARY="Настройки ACME сохранены при установке."
+	CERT_SUMMARY="$(translate 'Настройки ACME сохранены при установке.')"
 	ACME_NOTE=""
+fi
+
+if [ "$CONFIGURED" -eq 1 ]; then
+	PANEL_INFO="$(translate 'Панель уже настроена: адрес и сертификат не менялись.')"
+elif [ "$PANEL_ACCESS" = "public" ]; then
+	PANEL_INFO="$(translate 'Панель слушает 8443 на всех интерфейсах:')
+  https://${PANEL_HOST}:8443
+  $(translate 'после выпуска сертификата.')"
+else
+	if [ "$LANG_CODE" = "en" ]; then
+		SERVER_ADDR="<server-address>"
+	else
+		SERVER_ADDR="<адрес-сервера>"
+	fi
+	PANEL_INFO="$(translate 'Панель спрятана на петле. Проброс:')
+  ssh -L 8443:127.0.0.1:8443 root@${SERVER_ADDR}
+  $(translate 'Открыть:') https://127.0.0.1:8443
+  $(translate 'Имя сертификата:') ${PANEL_HOST}"
 fi
 
 info "готово"
 "$BIN" --version
 
-cat <<EOF
+if [ "$LANG_CODE" = "en" ]; then
+	cat <<EOF
+
+Service:   systemctl status ${PRODUCT}
+Database:  ${DB}
+Log:       ${LOG}
+
+${PANEL_INFO}
+
+The panel issues and renews the certificate itself. ${CERT_SUMMARY}
+${ACME_NOTE} Issuance runs in the background; the panel is already working.
+
+Change the administrator password:
+  systemctl stop ${PRODUCT}
+  runuser -u ${PRODUCT} -- ${BIN} passwd
+  systemctl start ${PRODUCT}
+EOF
+else
+	cat <<EOF
 
 Служба:   systemctl status ${PRODUCT}
 База:     ${DB}
 Журнал:   ${LOG}
 
-Панель слушает 8443. В режиме SSH-туннеля она доступна только с петли:
-  ssh -L 8443:127.0.0.1:8443 root@<адрес-сервера>
-и зайти на https://127.0.0.1:8443
-
-В публичном режиме панель слушает 8443 на всех интерфейсах — откройте её по
-адресу https://panel.${DOMAIN}:8443 после выпуска сертификата.
+${PANEL_INFO}
 
 Сертификат панель выпускает и продлевает сама. ${CERT_SUMMARY}
 ${ACME_NOTE} Выпуск идёт в фоне, панель при этом уже работает.
@@ -1301,9 +1867,21 @@ ${ACME_NOTE} Выпуск идёт в фоне, панель при этом у�
   runuser -u ${PRODUCT} -- ${BIN} passwd
   systemctl start ${PRODUCT}
 EOF
+fi
 
 if [ "$USE_DEBUG" -eq 1 ]; then
-	cat <<EOF
+	if [ "$LANG_CODE" = "en" ]; then
+		cat <<EOF
+
+There is no certificate for the domain yet, so the panel is running with a
+self-signed one: the browser will warn about an untrusted certificate. This is
+a temporary mode until ACME issues the certificate. The panel will issue it
+itself and keep running; after a file appears in ${CERTS_DIR}, running the
+installer again removes the temporary mode.
+See the panel for the issuance error and retry.
+EOF
+	else
+		cat <<EOF
 
 Сертификата для домена пока нет, поэтому панель поднята с самоподписанным:
 браузер предупредит о недоверенном сертификате. Это временный режим до выпуска
@@ -1311,12 +1889,26 @@ if [ "$USE_DEBUG" -eq 1 ]; then
 файла в ${CERTS_DIR} повторный запуск установщика уберёт временный режим.
 Причину отказа выпуска и повтор смотрите в интерфейсе панели.
 EOF
+	fi
 fi
 
 # Пароль — последним блоком: он генерируется при установке и показывается ровно
 # один раз. В базе лежит только хеш, восстановить его оттуда нельзя.
 if [ "$CONFIGURED" -eq 0 ] && [ "$PASSWORD_MODE" = "generate" ]; then
-	cat <<EOF
+	if [ "$LANG_CODE" = "en" ]; then
+		cat <<EOF
+
+============================================================
+  Panel access
+  name:     admin
+  password: ${ADMIN_PASSWORD}
+============================================================
+
+The password is shown once. Save it: the database contains only a hash,
+and the password cannot be recovered from there.
+EOF
+	else
+		cat <<EOF
 
 ============================================================
   Доступ в панель
@@ -1327,9 +1919,18 @@ if [ "$CONFIGURED" -eq 0 ] && [ "$PASSWORD_MODE" = "generate" ]; then
 Пароль показан один раз. Сохраните его: в базе лежит только хеш,
 и восстановить пароль оттуда нельзя.
 EOF
+	fi
 elif [ "$CONFIGURED" -eq 1 ]; then
-	cat <<EOF
+	if [ "$LANG_CODE" = "en" ]; then
+		cat <<EOF
+
+The administrator password was not changed: running the installer again does
+not touch it.
+EOF
+	else
+		cat <<EOF
 
 Пароль администратора не менялся: повторный запуск установщика его не трогает.
 EOF
+	fi
 fi

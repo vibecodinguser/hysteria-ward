@@ -39,6 +39,7 @@ e2e:
 
 lint:
 	golangci-lint run ./...
+	sh packaging/install_test.sh
 
 clean:
 	rm -rf bin
