@@ -297,6 +297,45 @@ HTTP-01, поэтому DNS-01 на ней не проверялся.
 - сертификат не пересоздавался: Let's Encrypt, SAN `homelab-devstand.ru` и `panel.homelab-devstand.ru`, срок до
   `2027-01-19T15:23:13Z`.
 
+## Прогон v0.6.0
+
+Релиз `v0.6.0` собран из коммита `cd81f0d`. Релизный прогон
+[`40087371700`](https://github.com/vibecodinguser/hysteria-ward/actions/runs/40087371700) завершился успешно;
+опубликованы архивы `linux_amd64`/`linux_arm64`, `checksums.txt`, `install.sh` и `update.sh`. Тег не черновик и не
+пререлиз.
+
+CI-прогон [`40081990770`](https://github.com/vibecodinguser/hysteria-ward/actions/runs/40081990770) проверил
+`0cbe57f`: тесты на Go 1.26 и stable, линтер, синтаксис установочных скриптов, интерфейс, сборку
+`linux/amd64`/`linux/arm64` и loopback-e2e — все шаги зелёные. CI-прогон
+[`40086403998`](https://github.com/vibecodinguser/hysteria-ward/actions/runs/40086403998) проверил релизный
+коммит `cd81f0d` с тем же результатом.
+
+Локально перед коммитом прошли `make test`, `make e2e`, `make lint`, `make build`, `sh -n packaging/install.sh`
+и `sh -n packaging/update.sh`.
+
+Проверка `acme` на копии базы `v0.4.0` с публичного сервера, настоящим бинарём `v0.6.0`:
+
+| Что проверено | Результат |
+|---|---|
+| Показ без флагов | `ACME: HTTP-01`; токен не печатается |
+| Cloudflare без токена | отказ с объяснением, копия базы не меняется |
+| Переход на hook | `DNS-01, хук /bin/true` |
+| Переход на Cloudflare | зона `test-zone`, `токен Cloudflare: задан`; подставной токен не попал в вывод |
+| Возврат на HTTP-01 | `HTTP-01`; токен и зона очищены |
+| Исходный бэкап | sha256 до и после совпадает |
+
+Публичная панель обновлена через `update.sh --version v0.6.0 --yes`:
+
+- `--dry-run` показал замену бинаря и systemd-юнита, копию базы и откат при неудачном запуске;
+- до обновления — `v0.5.0 (0b78ed3)`, после — `v0.6.0 (cd81f0d)`, `linux/amd64`;
+- перед обновлением создана копия
+  `/var/lib/hysteria-ward/backups/hysteria-ward-v0.5.0-20261024T105230Z.db`;
+- служба `active`, `/api/health` → 200, панель слушает TCP 8443, ядро — UDP 443;
+- в копии базы до обновления остались пользователь `asdasdasd` (`c105466b972fc7b9`) и его запись в бакете
+  `quota`; `update.sh` не меняет бакеты `users` и `auth`, поэтому пароль и пользователи не пересоздавались;
+- сертификат не пересоздавался: Let's Encrypt, SAN `homelab-devstand.ru` и `panel.homelab-devstand.ru`, срок до
+  `2027-01-19T15:23:13Z`, sha256 `7b0198d534bb28b971f84e4eb2b551a74fe45d7435ace38b3ee43f0b2b97cd4e`.
+
 ## Проверка MCP
 
 MCP проверен на loopback-панели, поднятой целиком через `make e2e`: настоящий HTTPS, вход администратора,
