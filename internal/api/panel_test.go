@@ -199,6 +199,53 @@ func TestPublicAccessRejectedOnServerDomain(t *testing.T) {
 	}
 }
 
+// TestLegacyPublicOnPanelDomain — старая база с доменом panel.* и публичной
+// панелью продолжает работать: до появления режимов это было штатное поведение.
+func TestLegacyPublicOnPanelDomain(t *testing.T) {
+	opts := options(t)
+	changePassword(t, opts)
+
+	if err := opts.Store.SaveDomain("panel.example.com"); err != nil {
+		t.Fatalf("SaveDomain() = %v", err)
+	}
+
+	settings, err := opts.Store.PanelSettings()
+	if err != nil {
+		t.Fatalf("PanelSettings() = %v", err)
+	}
+	settings.Access = store.AccessTunnel
+	settings.Mode = ""
+	settings.Domain = ""
+	if err := opts.Store.SavePanelSettings(settings); err != nil {
+		t.Fatalf("SavePanelSettings() = %v", err)
+	}
+
+	s := start(t, opts)
+	cookie, csrf := enter(t, s, authn.DefaultName, "новый пароль")
+
+	answer := decode[panelAnswer](t, do(t, s, http.MethodGet, "/api/panel", "", cookie, nil))
+	if answer.Host != "panel.example.com" {
+		t.Errorf("домен панели = %q, ожидался panel.example.com", answer.Host)
+	}
+
+	resp := do(t, s, http.MethodPost, "/api/panel/access", `{"access":"public"}`, cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("включение публичного доступа: код %d, ожидался 200", resp.StatusCode)
+	}
+	if s.Access() != store.AccessPublic {
+		t.Error("панель не открылась наружу для старой базы")
+	}
+
+	stored, err := opts.Store.PanelSettings()
+	if err != nil {
+		t.Fatalf("PanelSettings() = %v", err)
+	}
+	if stored.Access != store.AccessPublic || stored.Mode != "" {
+		t.Errorf("в базе %+v, ожидался public без явного режима", stored)
+	}
+}
+
 // TestPublicAccessWaitsForPasswordChange — с паролем по умолчанию панель наружу не
 // открывается: этот пароль знает кто угодно, он написан в документации.
 func TestPublicAccessWaitsForPasswordChange(t *testing.T) {
