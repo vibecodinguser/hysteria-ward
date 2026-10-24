@@ -200,6 +200,7 @@ DNS-провайдер (hook — своя программа, cloudflare — API
 Идентификатор зоны Cloudflare (необязательно, Enter — искать по домену):|Cloudflare zone ID (optional, Enter — find by domain):
 Режим доступа к панели (tunnel — SSH-туннель, public — снаружи) [tunnel]:|Panel access (tunnel — SSH tunnel, public — from outside) [tunnel]:
 Режим домена панели (server — домен сервера, subdomain — отдельное имя) [subdomain]:|Panel domain mode (server — server domain, subdomain — separate name) [subdomain]:
+Режим домена панели (server — домен сервера, subdomain — отдельное имя) [server]:|Panel domain mode (server — server domain, subdomain — separate name) [server]:
 Домен панели (Enter — panel.<домен>):|Panel domain (Enter — panel.<domain>):
 Masquerade (off — выключен, file — свой сайт, proxy — зеркало) [off]:|Masquerade (off — disabled, file — your site, proxy — mirror) [off]:
 Каталог сайта для masquerade:|Site directory for masquerade:
@@ -635,6 +636,16 @@ ask_language() {
 	done
 }
 
+# default_panel_mode — режим по умолчанию. Обычный домен сохраняет прежний адрес
+# panel.<домен>, то есть subdomain. Если домен сервера сам начинается с panel.,
+# прежний адрес — этот же домен: иначе получилось бы panel.panel.<домен>.
+default_panel_mode() {
+	case "$DOMAIN" in
+	panel.*) printf 'server' ;;
+	*) printf 'subdomain' ;;
+	esac
+}
+
 # ask_panel_mode спрашивает, где живёт имя панели. При публичном доступе выбор
 # один: панель не может делить домен с ядром.
 ask_panel_mode() {
@@ -643,14 +654,23 @@ ask_panel_mode() {
 		return
 	fi
 
+	mode_default="$(default_panel_mode)"
+
 	while :; do
-		printf '%s ' "$(translate 'Режим домена панели (server — домен сервера, subdomain — отдельное имя) [subdomain]:')" >&2
+		case "$mode_default" in
+		server)
+			printf '%s ' "$(translate 'Режим домена панели (server — домен сервера, subdomain — отдельное имя) [server]:')" >&2
+			;;
+		*)
+			printf '%s ' "$(translate 'Режим домена панели (server — домен сервера, subdomain — отдельное имя) [subdomain]:')" >&2
+			;;
+		esac
 		if ! IFS= read -r PANEL_MODE; then
 			die "ввод режима домена панели оборван"
 		fi
 
 		PANEL_MODE="$(trim "$PANEL_MODE" | tr '[:upper:]' '[:lower:]')"
-		[ -n "$PANEL_MODE" ] || PANEL_MODE="subdomain"
+		[ -n "$PANEL_MODE" ] || PANEL_MODE="$mode_default"
 
 		case "$PANEL_MODE" in
 		server|subdomain) return ;;
@@ -898,7 +918,16 @@ validate_answers() {
 
 	PANEL_MODE="$(trim "$PANEL_MODE" | tr '[:upper:]' '[:lower:]')"
 	PANEL_DOMAIN="$(trim "$PANEL_DOMAIN" | tr '[:upper:]' '[:lower:]')"
-	[ -n "$PANEL_MODE" ] || PANEL_MODE="subdomain"
+	if [ -z "$PANEL_MODE" ]; then
+		# Явный домен панели уже означает subdomain. Публичная панель тоже не
+		# может жить на домене сервера, поэтому для неё умолчание всегда
+		# subdomain. Для туннеля без явного домена сохраняется прежний адрес.
+		if [ -n "$PANEL_DOMAIN" ] || [ "$PANEL_ACCESS" = "public" ]; then
+			PANEL_MODE="subdomain"
+		else
+			PANEL_MODE="$(default_panel_mode)"
+		fi
+	fi
 
 	case "$PANEL_MODE" in
 	server|subdomain) ;;
