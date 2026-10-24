@@ -35,7 +35,7 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	domain := fs.String("domain", "", "домен сервера")
 	email := fs.String("email", "", "e-mail для ACME")
 	access := fs.String("access", "", "режим доступа к панели: tunnel или public")
-	panelMode := fs.String("panel-mode", string(store.PanelModeSubdomain), "режим домена панели: server или subdomain")
+	panelMode := fs.String("panel-mode", "", "режим домена панели: server или subdomain (по умолчанию subdomain; для домена panel.* — server)")
 	panelDomain := fs.String("panel-domain", "", "домен панели (по умолчанию panel.<домен>; подразумевает subdomain)")
 	mode := fs.String("masquerade", "", "режим masquerade: off, file или proxy")
 	modeFile := fs.String("masquerade-file", "", "каталог сайта для режима file")
@@ -77,8 +77,20 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	panel := store.DefaultPanelSettings()
 	panel.Access = store.Access(*access)
-	panel.Mode = store.PanelMode(*panelMode)
 	panel.Domain = strings.TrimSpace(*panelDomain)
+
+	panelModeValue := strings.TrimSpace(*panelMode)
+	if panelModeValue == "" {
+		// Прежнее поведение: домен, который сам начинается с panel., уже был
+		// именем панели. Иначе установка с теми же флагами, что и раньше,
+		// получила бы panel.panel.<домен>.
+		panelModeValue = string(store.PanelModeSubdomain)
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(*domain)), "panel.") && panel.Domain == "" {
+			panelModeValue = string(store.PanelModeServer)
+		}
+	}
+	panel.Mode = store.PanelMode(panelModeValue)
+
 	// Явный домен панели имеет смысл только в режиме subdomain. Установщик
 	// передаёт --panel-domain, не повторяя режим, поэтому флаг сам его включает.
 	// Сочетание с явным --panel-mode server — противоречие, а не повод молча

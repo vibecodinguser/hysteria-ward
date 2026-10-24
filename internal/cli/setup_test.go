@@ -151,6 +151,65 @@ func TestRunSetupPanelServer(t *testing.T) {
 	}
 }
 
+// TestRunSetupPanelDomainDefaultsServer — без --panel-mode домен panel.* остаётся
+// именем панели: так же он вёл себя до появления режимов.
+func TestRunSetupPanelDomainDefaultsServer(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hysteria-ward.db")
+
+	code, stdout, stderr := runSetup(t, "пароль администратора\n",
+		"--db", dbPath,
+		"--domain", "PANEL.Example.COM",
+		"--email", "admin@example.com",
+		"--access", "tunnel",
+		"--masquerade", "off",
+		"--password-stdin",
+	)
+	if code != 0 {
+		t.Fatalf("Run(setup) = %d, ожидалось 0; stderr: %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "домен панели: panel.example.com") {
+		t.Errorf("в stdout нет прежнего адреса панели: %q", stdout)
+	}
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	defer s.Close()
+
+	panel, err := s.PanelSettings()
+	if err != nil {
+		t.Fatalf("PanelSettings() = %v", err)
+	}
+	if panel.Mode != store.PanelModeServer {
+		t.Errorf("режим = %q, ожидался server", panel.Mode)
+	}
+	if host := panel.Host("panel.example.com"); host != "panel.example.com" {
+		t.Errorf("домен панели = %q, ожидался panel.example.com", host)
+	}
+}
+
+// TestRunSetupPanelDomainPublicNeedsSubdomain — публичную панель на домене panel.*
+// нужно явно перевести в subdomain: иначе она оказалась бы на домене сервера.
+func TestRunSetupPanelDomainPublicNeedsSubdomain(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hysteria-ward.db")
+
+	code, _, stderr := runSetup(t, "пароль администратора\n",
+		"--db", dbPath,
+		"--domain", "panel.example.com",
+		"--email", "admin@example.com",
+		"--access", "public",
+		"--masquerade", "off",
+		"--password-stdin",
+	)
+	if code == 0 {
+		t.Fatal("Run(setup) = 0, ожидался отказ для public + server")
+	}
+	if !strings.Contains(stderr, "публичная панель") {
+		t.Errorf("ошибка = %q, ожидалась причина отказа", stderr)
+	}
+}
+
 // TestRunSetupPanelDomainImpliesSubdomain — явный домен панели включает режим
 // subdomain, даже если режим не передали отдельным флагом.
 func TestRunSetupPanelDomainImpliesSubdomain(t *testing.T) {
