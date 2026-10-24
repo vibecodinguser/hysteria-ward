@@ -116,7 +116,8 @@ Installer answers:
                          (Zone.DNS Edit; Zone.Zone Read is also needed to find the zone)
   --acme-dns-zone-id ID  Cloudflare zone ID (optional)
   --access MODE          tunnel (SSH tunnel) or public (from outside)
-  --panel-mode MODE      panel domain: server or subdomain (default: subdomain)
+  --panel-mode MODE      panel domain: server or subdomain (default: subdomain;
+                         server for a panel.* server domain)
   --panel-domain NAME    separate panel domain; implies subdomain
   --masquerade MODE      off, file or proxy
   --masquerade-file DIR  site directory for file mode
@@ -161,7 +162,8 @@ EOF
                          (Zone.DNS Edit; для поиска зоны ещё Zone.Zone Read)
   --acme-dns-zone-id ID  идентификатор зоны Cloudflare (необязательно)
   --access РЕЖИМ         tunnel (SSH-туннель) или public (снаружи)
-  --panel-mode РЕЖИМ     домен панели: server или subdomain (по умолчанию subdomain)
+  --panel-mode РЕЖИМ     домен панели: server или subdomain (по умолчанию subdomain;
+                         для домена panel.* — server)
   --panel-domain ИМЯ     отдельный домен панели; подразумевает subdomain
   --masquerade РЕЖИМ     off, file или proxy
   --masquerade-file КАТ  каталог сайта для file
