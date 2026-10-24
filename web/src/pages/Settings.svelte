@@ -415,6 +415,22 @@
 			{m.settings_panel_listening({ addr: panel.addr })}
 		</p>
 
+		{#if panel.host}
+			<p class="mt-1 text-sm text-slate-400">
+				{m.settings_panel_host({ host: panel.host })}
+			</p>
+			{#if panel.access === 'public'}
+				<a
+					class="mt-2 inline-block text-sm text-sky-400 transition-colors hover:text-sky-300"
+					href={`https://${panel.host}:8443`}
+					target="_blank"
+					rel="noreferrer"
+				>
+					{m.settings_panel_host_link({ host: panel.host })}
+				</a>
+			{/if}
+		{/if}
+
 		{#if panel.access === 'public'}
 			<p class="mt-4 text-sm text-amber-400" role="status">{m.settings_panel_public()}</p>
 
