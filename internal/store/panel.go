@@ -220,8 +220,13 @@ func (p PanelSettings) ValidateFor(serverDomain string) error {
 
 	// У IP-адреса нет registrable domain, и правило «панель в том же базовом
 	// домене» к нему неприменимо. Старые установки на адресе не ломаем: ACME для
-	// IP всё равно не выписать, но панель должна запускаться как раньше.
+	// IP всё равно не выписать, но панель должна запускаться как раньше. Запрет
+	// публичной панели на домене сервера остаётся: он не про базовый домен.
 	if net.ParseIP(serverDomain) != nil {
+		if p.Access == AccessPublic && p.effectiveMode(serverDomain) == PanelModeServer {
+			return errors.New("публичная панель не может жить на домене сервера: выберите отдельный поддомен")
+		}
+
 		return nil
 	}
 

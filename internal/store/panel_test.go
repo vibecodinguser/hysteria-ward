@@ -296,6 +296,16 @@ func TestPanelSettingsValidateFor(t *testing.T) {
 			settings: store.PanelSettings{Access: store.AccessPublic, Port: 8443},
 			server:   "203.0.113.5",
 		},
+		{
+			name: "публичная панель на IP в режиме server",
+			settings: store.PanelSettings{
+				Access: store.AccessPublic,
+				Port:   8443,
+				Mode:   store.PanelModeServer,
+			},
+			server:  "203.0.113.5",
+			wantErr: true,
+		},
 	}
 
 	for _, test := range tests {
