@@ -40,7 +40,8 @@ grep -q 'https://panel\.' "$SCRIPT" && fail "в установщике оста�
 # наличие перевода, а не отдельный список идентификаторов.
 used=$(mktemp)
 catalog=$(mktemp)
-trap 'rm -f "$used" "$catalog"' EXIT
+harness=$(mktemp)
+trap 'rm -f "$used" "$catalog" "$harness"' EXIT
 
 grep -o "translate '[^']*'" "$SCRIPT" |
 	sed "s/^translate '//; s/'$//" |
@@ -60,5 +61,68 @@ duplicates=$(awk '
 	inside && index($0,"|") {split($0,a,"|"); print a[1]}
 ' "$SCRIPT" | sort | uniq -d)
 [ -z "$duplicates" ] || fail "повторяющиеся ключи каталога: $duplicates"
+
+# Проверки ответов без root: берём только функции до разбора аргументов и
+# вызываем validate_answers на парах «сервер — панель». Так правила установщика
+# не расходятся с store, даже если их правят отдельно.
+marker=$(grep -n '^while \[ "\$#" -gt 0 \]; do' "$SCRIPT" | head -1 | cut -d: -f1)
+[ -n "$marker" ] || fail "не найден разбор аргументов установщика"
+
+head -n $((marker - 1)) "$SCRIPT" >"$harness"
+cat >>"$harness" <<'HARNESS'
+
+setup_base() {
+	DOMAIN="$1"
+	PANEL_ACCESS="$2"
+	PANEL_MODE="${3:-}"
+	PANEL_DOMAIN="${4:-}"
+	ACME_EMAIL="admin@example.com"
+	ACME_MODE="http"
+	ACME_DIRECTORY=""
+	ACME_DNS_PROVIDER=""
+	ACME_DNS_HOOK=""
+	ACME_DNS_TOKEN_FILE=""
+	ACME_DNS_ZONE_ID=""
+	MASQUERADE="off"
+	MASQUERADE_FILE=""
+	MASQUERADE_PROXY=""
+	PASSWORD_MODE="generate"
+	ADMIN_PASSWORD=""
+}
+
+expect_panel() {
+	label="$1"
+	setup_base "$2" "$3" "$4" "$5"
+	validate_answers
+
+	[ "$PANEL_MODE" = "$6" ] ||
+		{ printf 'FAIL: %s: режим %s, ожидался %s\n' "$label" "$PANEL_MODE" "$6" >&2; exit 1; }
+	[ "$PANEL_HOST" = "$7" ] ||
+		{ printf 'FAIL: %s: домен %s, ожидался %s\n' "$label" "$PANEL_HOST" "$7" >&2; exit 1; }
+}
+
+expect_reject() {
+	label="$1"
+	shift
+	setup_base "$@"
+
+	if ( validate_answers ) >/dev/null 2>&1; then
+		printf 'FAIL: %s: пара принята\n' "$label" >&2
+		exit 1
+	fi
+}
+
+expect_panel "example.com tunnel" example.com tunnel "" "" subdomain panel.example.com
+expect_panel "panel.* tunnel" panel.example.com tunnel "" "" server panel.example.com
+expect_panel "явный поддомен" example.com tunnel "" admin.example.com subdomain admin.example.com
+expect_panel "явный домен включает subdomain" example.com public "" admin.example.com subdomain admin.example.com
+expect_reject "public + server" example.com public server ""
+expect_reject "чужой базовый домен" example.com tunnel "" panel.example.net
+expect_reject "server с доменом" example.com tunnel server admin.example.com
+
+printf 'install.sh: проверки домена панели пройдены\n'
+HARNESS
+
+sh "$harness" || exit 1
 
 printf 'install.sh: проверки пройдены\n'
