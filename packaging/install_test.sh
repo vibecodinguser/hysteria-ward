@@ -115,6 +115,7 @@ expect_panel "example.com tunnel" example.com tunnel "" "" subdomain panel.examp
 expect_panel "panel.* tunnel" panel.example.com tunnel "" "" server panel.example.com
 expect_panel "явный поддомен" example.com tunnel "" admin.example.com subdomain admin.example.com
 expect_panel "явный домен включает subdomain" example.com public "" admin.example.com subdomain admin.example.com
+expect_panel "panel.* public уходит на поддомен" panel.example.com public "" "" subdomain panel.panel.example.com
 expect_reject "public + server" example.com public server ""
 expect_reject "чужой базовый домен" example.com tunnel "" panel.example.net
 expect_reject "server с доменом" example.com tunnel server admin.example.com
