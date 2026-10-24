@@ -189,9 +189,45 @@ func TestRunSetupPanelDomainDefaultsServer(t *testing.T) {
 	}
 }
 
-// TestRunSetupPanelDomainPublicNeedsSubdomain — публичную панель на домене panel.*
-// нужно явно перевести в subdomain: иначе она оказалась бы на домене сервера.
-func TestRunSetupPanelDomainPublicNeedsSubdomain(t *testing.T) {
+// TestRunSetupPanelDomainPublicGoesToSubdomain — публичная панель не может жить
+// на домене сервера, поэтому для домена panel.* умолчание — subdomain, а не
+// server, как для туннеля.
+func TestRunSetupPanelDomainPublicGoesToSubdomain(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hysteria-ward.db")
+
+	code, stdout, stderr := runSetup(t, "пароль администратора\n",
+		"--db", dbPath,
+		"--domain", "panel.example.com",
+		"--email", "admin@example.com",
+		"--access", "public",
+		"--masquerade", "off",
+		"--password-stdin",
+	)
+	if code != 0 {
+		t.Fatalf("Run(setup) = %d, ожидалось 0; stderr: %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "домен панели: panel.panel.example.com") {
+		t.Errorf("в stdout нет поддомена: %q", stdout)
+	}
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	defer s.Close()
+
+	panel, err := s.PanelSettings()
+	if err != nil {
+		t.Fatalf("PanelSettings() = %v", err)
+	}
+	if panel.Mode != store.PanelModeSubdomain || panel.Domain != "" {
+		t.Errorf("настройки панели = %+v, ожидался subdomain с пустым доменом", panel)
+	}
+}
+
+// TestRunSetupPanelDomainPublicExplicitServer — явный server с публичной панелью
+// отвергается даже для домена panel.*.
+func TestRunSetupPanelDomainPublicExplicitServer(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hysteria-ward.db")
 
 	code, _, stderr := runSetup(t, "пароль администратора\n",
@@ -199,6 +235,7 @@ func TestRunSetupPanelDomainPublicNeedsSubdomain(t *testing.T) {
 		"--domain", "panel.example.com",
 		"--email", "admin@example.com",
 		"--access", "public",
+		"--panel-mode", "server",
 		"--masquerade", "off",
 		"--password-stdin",
 	)

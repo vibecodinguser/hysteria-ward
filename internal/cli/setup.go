@@ -83,9 +83,13 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if panelModeValue == "" {
 		// Прежнее поведение: домен, который сам начинается с panel., уже был
 		// именем панели. Иначе установка с теми же флагами, что и раньше,
-		// получила бы panel.panel.<домен>.
+		// получила бы panel.panel.<домен>. Для публичной панели это правило не
+		// действует: она не может жить на домене сервера, поэтому умолчание —
+		// subdomain.
 		panelModeValue = string(store.PanelModeSubdomain)
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(*domain)), "panel.") && panel.Domain == "" {
+		if panel.Access != store.AccessPublic &&
+			strings.HasPrefix(strings.ToLower(strings.TrimSpace(*domain)), "panel.") &&
+			panel.Domain == "" {
 			panelModeValue = string(store.PanelModeServer)
 		}
 	}
