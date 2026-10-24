@@ -957,7 +957,7 @@ validate_answers() {
 		[ "$PANEL_HOST" != "$DOMAIN" ] ||
 			die "домен панели должен отличаться от домена сервера: $PANEL_HOST"
 		[ "$(base_domain "$DOMAIN")" = "$(base_domain "$PANEL_HOST")" ] ||
-			die "домен панели должен быть в том же базовом домене, что и $DOMAIN: $PANEL_HOST"
+			die "$(translate 'домен панели должен быть в том же базовом домене, что и') $DOMAIN: $PANEL_HOST"
 	fi
 
 	case "$MASQUERADE" in
@@ -1614,7 +1614,7 @@ EXPECTED="$(awk -v name="$ASSET" '$2 == name { print $1; exit }' "$TMP/checksums
 
 ACTUAL="$(sha256sum "$TMP/$ASSET" | awk '{print $1}')"
 [ "$ACTUAL" = "$EXPECTED" ] ||
-	die "контрольная сумма $ASSET не сошлась: ожидалась $EXPECTED, получена $ACTUAL"
+	die "$(translate 'контрольная сумма') $ASSET $(translate 'не сошлась: ожидалась') $EXPECTED, $(translate 'получена') $ACTUAL"
 
 info "распаковываю"
 mkdir -p "$TMP/unpack"
@@ -1637,7 +1637,7 @@ esac
 GOT_VERSION="$(printf '%s\n' "$GOT" | awk '{print $2}')"
 [ "$GOT_VERSION" != "dev" ] || die "в релизе оказалась отладочная сборка"
 if [ "$TARGET_VERSION" != "latest" ] && [ "$GOT_VERSION" != "$TARGET_VERSION" ]; then
-	die "в архиве версия $GOT_VERSION, ожидалась $TARGET_VERSION"
+	die "$(translate 'в архиве версия') $GOT_VERSION, $(translate 'ожидалась') $TARGET_VERSION"
 fi
 
 # Ответы проверяет тот же код, который будет их записывать. Проверка ничего не

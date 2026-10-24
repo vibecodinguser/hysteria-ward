@@ -1,10 +1,10 @@
 #!/bin/sh
 # Проверки установщика, которые не требуют root и сети. Запускаются из make lint:
-# синтаксис, справка на обоих языках, --lang до --help и отсутствие жёстко
-# заданного адреса панели в итоговом блоке.
+# синтаксис, справка на обоих языках, --lang до --help, покрытие перевода и
+# правила пары «домен сервера — домен панели».
 set -eu
 
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 SCRIPT="${HERE}/install.sh"
 
 fail() {
@@ -103,8 +103,7 @@ expect_panel() {
 
 expect_reject() {
 	label="$1"
-	shift
-	setup_base "$@"
+	setup_base "$2" "$3" "$4" "$5"
 
 	if ( validate_answers ) >/dev/null 2>&1; then
 		printf 'FAIL: %s: пара принята\n' "$label" >&2
