@@ -88,6 +88,11 @@ jobs:
             exit 1
           fi
 
+      # Справка на обоих языках, --lang до --help и покрытие английского
+      # каталога. Без root и сети, поэтому быстро.
+      - name: Проверить установщик
+        run: sh packaging/install_test.sh
+
   ui:
     name: Интерфейс
     runs-on: [self-hosted, hysteria-ward-ci]
