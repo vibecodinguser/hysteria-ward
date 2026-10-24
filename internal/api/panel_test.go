@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 type panelAnswer struct {
 	Access string `json:"access"`
 	Addr   string `json:"addr"`
+	Host   string `json:"host"`
 }
 
 // enter входит в панель и возвращает cookie сессии и csrf-токен: без второго
@@ -109,6 +111,91 @@ func TestSwitchesAccessWithoutRestart(t *testing.T) {
 	}
 	if host := hostOf(t, answer.Addr); host != "127.0.0.1" {
 		t.Errorf("панель слушает %q, ожидалась петля", answer.Addr)
+	}
+}
+
+// TestPanelHostFollowsMode — интерфейс получает имя панели, а не выводит его
+// сам: в режиме server это домен сервера, в subdomain — отдельное имя.
+func TestPanelHostFollowsMode(t *testing.T) {
+	tests := []struct {
+		name   string
+		mode   store.PanelMode
+		domain string
+		want   string
+	}{
+		{name: "server", mode: store.PanelModeServer, want: "example.com"},
+		{name: "subdomain по умолчанию", mode: store.PanelModeSubdomain, want: "panel.example.com"},
+		{name: "свой поддомен", mode: store.PanelModeSubdomain, domain: "admin.example.com", want: "admin.example.com"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			opts := options(t)
+			if err := opts.Store.SaveDomain("example.com"); err != nil {
+				t.Fatalf("SaveDomain() = %v", err)
+			}
+
+			settings, err := opts.Store.PanelSettings()
+			if err != nil {
+				t.Fatalf("PanelSettings() = %v", err)
+			}
+			settings.Mode = test.mode
+			settings.Domain = test.domain
+			if err := opts.Store.SavePanelSettings(settings); err != nil {
+				t.Fatalf("SavePanelSettings() = %v", err)
+			}
+
+			s := start(t, opts)
+			cookie, _ := enter(t, s, authn.DefaultName, authn.DefaultPassword)
+
+			answer := decode[panelAnswer](t, do(t, s, http.MethodGet, "/api/panel", "", cookie, nil))
+			if answer.Host != test.want {
+				t.Errorf("домен панели = %q, ожидался %q", answer.Host, test.want)
+			}
+		})
+	}
+}
+
+// TestPublicAccessRejectedOnServerDomain — публичная панель не делит имя с
+// сервером: переключение отвергается до смены слушателя.
+func TestPublicAccessRejectedOnServerDomain(t *testing.T) {
+	opts := options(t)
+	changePassword(t, opts)
+
+	if err := opts.Store.SaveDomain("example.com"); err != nil {
+		t.Fatalf("SaveDomain() = %v", err)
+	}
+
+	settings, err := opts.Store.PanelSettings()
+	if err != nil {
+		t.Fatalf("PanelSettings() = %v", err)
+	}
+	settings.Mode = store.PanelModeServer
+	if err := opts.Store.SavePanelSettings(settings); err != nil {
+		t.Fatalf("SavePanelSettings() = %v", err)
+	}
+
+	s := start(t, opts)
+	cookie, csrf := enter(t, s, authn.DefaultName, "новый пароль")
+
+	resp := do(t, s, http.MethodPost, "/api/panel/access", `{"access":"public"}`, cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("включение публичного доступа: код %d, ожидался 400", resp.StatusCode)
+	}
+	if body := readBody(t, resp); !strings.Contains(body, "публичная панель") {
+		t.Errorf("ответ = %q, ожидалась причина отказа", body)
+	}
+	if s.Access() != store.AccessTunnel {
+		t.Error("панель открыта наружу, хотя пара с доменом сервера недопустима")
+	}
+
+	stored, err := opts.Store.PanelSettings()
+	if err != nil {
+		t.Fatalf("PanelSettings() = %v", err)
+	}
+	if stored.Access != store.AccessTunnel {
+		t.Errorf("в базе доступ %q, ожидался tunnel", stored.Access)
 	}
 }
 

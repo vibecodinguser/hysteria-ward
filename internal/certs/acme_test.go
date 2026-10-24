@@ -159,34 +159,6 @@ func TestAccountKeyRejectsGarbage(t *testing.T) {
 	}
 }
 
-// TestHosts — один сертификат покрывает домен сервера и имя панели; если домен
-// уже panel., второго имени нет.
-func TestHosts(t *testing.T) {
-	tests := []struct {
-		domain string
-		want   []string
-	}{
-		{"example.com", []string{"example.com", "panel.example.com"}},
-		{" Example.COM ", []string{"example.com", "panel.example.com"}},
-		{"panel.example.com", []string{"panel.example.com"}},
-		{"", nil},
-	}
-
-	for _, test := range tests {
-		got := Hosts(test.domain)
-		if len(got) != len(test.want) {
-			t.Errorf("Hosts(%q) = %v, ожидалось %v", test.domain, got, test.want)
-			continue
-		}
-		for i := range got {
-			if got[i] != test.want[i] {
-				t.Errorf("Hosts(%q) = %v, ожидалось %v", test.domain, got, test.want)
-				break
-			}
-		}
-	}
-}
-
 // TestCovers — сертификат годится, только если выписан на все нужные имена:
 // после смены домена прежний сертификат покрывает не то, что нужно.
 func TestCovers(t *testing.T) {

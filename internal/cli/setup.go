@@ -35,6 +35,8 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	domain := fs.String("domain", "", "домен сервера")
 	email := fs.String("email", "", "e-mail для ACME")
 	access := fs.String("access", "", "режим доступа к панели: tunnel или public")
+	panelMode := fs.String("panel-mode", string(store.PanelModeSubdomain), "режим домена панели: server или subdomain")
+	panelDomain := fs.String("panel-domain", "", "домен панели (по умолчанию panel.<домен>; подразумевает subdomain)")
 	mode := fs.String("masquerade", "", "режим masquerade: off, file или proxy")
 	modeFile := fs.String("masquerade-file", "", "каталог сайта для режима file")
 	modeProxy := fs.String("masquerade-proxy", "", "адрес зеркала для режима proxy")
@@ -75,6 +77,15 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	panel := store.DefaultPanelSettings()
 	panel.Access = store.Access(*access)
+	panel.Mode = store.PanelMode(*panelMode)
+	panel.Domain = strings.TrimSpace(*panelDomain)
+	// Явный домен панели имеет смысл только в режиме subdomain. Установщик
+	// передаёт --panel-domain, не повторяя режим, поэтому флаг сам его включает.
+	// Сочетание с явным --panel-mode server — противоречие, а не повод молча
+	// выбрать один из ответов.
+	if panel.Domain != "" && panel.Mode != store.PanelModeServer {
+		panel.Mode = store.PanelModeSubdomain
+	}
 	if err := panel.Validate(); err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
@@ -178,8 +189,10 @@ func runSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Печатаются уже нормализованные ответы: ровно то, что легло на диск, а не
 	// то, что ввели с лишними пробелами или заглавными буквами.
 	fmt.Fprintf(stdout, "домен: %s\n", setup.Domain)
+	fmt.Fprintf(stdout, "домен панели: %s\n", setup.Panel.Host(setup.Domain))
+	fmt.Fprintf(stdout, "сертификат: %s\n", strings.Join(setup.Panel.Hosts(setup.Domain), ", "))
 	fmt.Fprintf(stdout, "e-mail ACME: %s\n", setup.ACMEEmail)
-	fmt.Fprintf(stdout, "панель: %s, порт %d\n", accessText(panel.Access), panel.Port)
+	fmt.Fprintf(stdout, "панель: %s, порт %d\n", accessText(setup.Panel.Access), setup.Panel.Port)
 	fmt.Fprintf(stdout, "masquerade: %s\n", masqueradeText(masquerade))
 	fmt.Fprintf(stdout, "ACME: %s\n", acmeText(setup.ACME))
 

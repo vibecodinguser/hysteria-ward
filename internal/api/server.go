@@ -2,10 +2,9 @@ package api
 
 import (
 	"net/http"
-	"strings"
 
-	"github.com/vibecodinguser/hysteria-ward/internal/certs"
 	"github.com/vibecodinguser/hysteria-ward/internal/config"
+	"github.com/vibecodinguser/hysteria-ward/internal/store"
 )
 
 // serverAnswer — настройки сервера, которые видит администратор и которые нужны
@@ -47,7 +46,38 @@ func (s *Server) handleSetServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.SaveDomain(request.Domain); err != nil {
+	domain, err := store.NormalizeDomain(request.Domain)
+	if err != nil {
+		if isBadDomain(err) {
+			s.answerError(w, http.StatusBadRequest, err.Error())
+
+			return
+		}
+
+		s.answerStoreError(w, "проверка домена", err)
+
+		return
+	}
+
+	settings, err := s.store.PanelSettings()
+	if err != nil {
+		s.answerStoreError(w, "чтение настроек панели", err)
+
+		return
+	}
+
+	// Новый домен может сделать недопустимой пару «сервер — панель»: например,
+	// публичная панель оказалась бы на домене сервера или явный домен панели
+	// выпал бы из нового базового домена. Проверяем до записи.
+	if domain != "" {
+		if err := settings.ValidateFor(domain); err != nil {
+			s.answerError(w, http.StatusBadRequest, err.Error())
+
+			return
+		}
+	}
+
+	if err := s.store.SaveDomain(domain); err != nil {
 		if isBadDomain(err) {
 			s.answerError(w, http.StatusBadRequest, err.Error())
 
@@ -61,12 +91,12 @@ func (s *Server) handleSetServer(w http.ResponseWriter, r *http.Request) {
 
 	// Новый домен требует нового сертификата: прежний выписан на другие имена.
 	// Имена обновляются до пробуждения выпуска, а сам выпуск идёт в фоне.
-	if s.certificates != nil && request.Domain != "" {
-		s.certificates.SetNames(certs.Hosts(request.Domain))
+	if s.certificates != nil && domain != "" {
+		s.certificates.SetNames(settings.Hosts(domain))
 		s.certificates.Kick()
 	}
 
-	s.logger.Info("домен сервера записан", "domain", strings.TrimSpace(request.Domain))
+	s.logger.Info("домен сервера записан", "domain", domain)
 
 	answer, err := s.serverSettings()
 	if err != nil {

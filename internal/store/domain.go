@@ -67,6 +67,14 @@ func (s *Store) SaveDomain(domain string) error {
 	})
 }
 
+// NormalizeDomain приводит домен к тому виду, в котором он хранится: без
+// пробелов по краям, без схемы и порта, малыми буквами. Экспортируется для
+// проверок API: домен сервера нужно проверить до записи и до смены имён
+// сертификата.
+func NormalizeDomain(domain string) (string, error) {
+	return normalizeDomain(domain)
+}
+
 // normalizeDomain приводит домен к тому виду, в котором он хранится: без пробелов
 // по краям, без схемы и порта, малыми буквами.
 //

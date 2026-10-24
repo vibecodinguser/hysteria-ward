@@ -69,8 +69,11 @@ func ValidateInitialSetup(setup InitialSetup) (InitialSetup, error) {
 		return InitialSetup{}, fmt.Errorf("конфигурация сервера: %w", err)
 	}
 
-	panel := setup.Panel.withDefaults()
-	if err := panel.Validate(); err != nil {
+	panel, err := setup.Panel.normalized()
+	if err != nil {
+		return InitialSetup{}, err
+	}
+	if err := panel.ValidateFor(domain); err != nil {
 		return InitialSetup{}, err
 	}
 

@@ -80,6 +80,12 @@ func TestRunSetupSavesAnswers(t *testing.T) {
 	if panel.Access != store.AccessPublic || panel.Port != 8443 {
 		t.Errorf("настройки панели = %+v, ожидался публичный доступ на 8443", panel)
 	}
+	if panel.Mode != store.PanelModeSubdomain {
+		t.Errorf("режим панели = %q, ожидался subdomain", panel.Mode)
+	}
+	if host := panel.Host(domain); host != "panel.example.com" {
+		t.Errorf("домен панели = %q, ожидался panel.example.com", host)
+	}
 
 	stored, ok, err := s.Credential()
 	if err != nil {
@@ -97,6 +103,137 @@ func TestRunSetupSavesAnswers(t *testing.T) {
 	}
 	if !matched {
 		t.Error("заданный пароль не подошёл")
+	}
+}
+
+// TestRunSetupPanelServer — режим server кладёт панель на домен сервера и
+// оставляет в сертификате одно имя.
+func TestRunSetupPanelServer(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hysteria-ward.db")
+
+	code, stdout, stderr := runSetup(t, "пароль администратора\n",
+		"--db", dbPath,
+		"--domain", "example.com",
+		"--email", "admin@example.com",
+		"--access", "tunnel",
+		"--panel-mode", "server",
+		"--masquerade", "off",
+		"--password-stdin",
+	)
+	if code != 0 {
+		t.Fatalf("Run(setup) = %d, ожидалось 0; stderr: %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "домен панели: example.com") {
+		t.Errorf("в stdout нет домена панели: %q", stdout)
+	}
+	if !strings.Contains(stdout, "сертификат: example.com") {
+		t.Errorf("в stdout нет одного имени сертификата: %q", stdout)
+	}
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	defer s.Close()
+
+	panel, err := s.PanelSettings()
+	if err != nil {
+		t.Fatalf("PanelSettings() = %v", err)
+	}
+	if panel.Mode != store.PanelModeServer {
+		t.Errorf("режим = %q, ожидался server", panel.Mode)
+	}
+	if panel.Domain != "" {
+		t.Errorf("домен панели = %q, ожидался пустой", panel.Domain)
+	}
+	if host := panel.Host("example.com"); host != "example.com" {
+		t.Errorf("домен панели = %q, ожидался example.com", host)
+	}
+}
+
+// TestRunSetupPanelDomainImpliesSubdomain — явный домен панели включает режим
+// subdomain, даже если режим не передали отдельным флагом.
+func TestRunSetupPanelDomainImpliesSubdomain(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hysteria-ward.db")
+
+	code, stdout, stderr := runSetup(t, "пароль администратора\n",
+		"--db", dbPath,
+		"--domain", "example.com",
+		"--email", "admin@example.com",
+		"--access", "tunnel",
+		"--panel-domain", "Admin.Example.COM",
+		"--masquerade", "off",
+		"--password-stdin",
+	)
+	if code != 0 {
+		t.Fatalf("Run(setup) = %d, ожидалось 0; stderr: %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "домен панели: admin.example.com") {
+		t.Errorf("в stdout нет нормализованного домена панели: %q", stdout)
+	}
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	defer s.Close()
+
+	panel, err := s.PanelSettings()
+	if err != nil {
+		t.Fatalf("PanelSettings() = %v", err)
+	}
+	if panel.Mode != store.PanelModeSubdomain {
+		t.Errorf("режим = %q, ожидался subdomain", panel.Mode)
+	}
+	if panel.Domain != "admin.example.com" {
+		t.Errorf("домен панели = %q, ожидался admin.example.com", panel.Domain)
+	}
+}
+
+// TestRunSetupRejectsBadPanelPair — недопустимая пара «сервер — панель»
+// отвергается до записи, с объяснением причины.
+func TestRunSetupRejectsBadPanelPair(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "публичная панель на домене сервера",
+			args: []string{"--access", "public", "--panel-mode", "server"},
+			want: "публичная панель",
+		},
+		{
+			name: "поддомен в другом базовом домене",
+			args: []string{"--access", "tunnel", "--panel-domain", "panel.example.net"},
+			want: "базовом домене",
+		},
+		{
+			name: "server с отдельным доменом",
+			args: []string{"--access", "tunnel", "--panel-mode", "server", "--panel-domain", "admin.example.com"},
+			want: "в режиме server",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args := []string{
+				"--db", filepath.Join(t.TempDir(), "hysteria-ward.db"),
+				"--domain", "example.com",
+				"--email", "admin@example.com",
+				"--masquerade", "off",
+				"--password-stdin",
+			}
+			args = append(args, test.args...)
+
+			code, _, stderr := runSetup(t, "пароль администратора\n", args...)
+			if code == 0 {
+				t.Fatal("Run(setup) = 0, ожидался отказ")
+			}
+			if !strings.Contains(stderr, test.want) {
+				t.Errorf("ошибка = %q, ожидалась причина %q", stderr, test.want)
+			}
+		})
 	}
 }
 

@@ -14,11 +14,33 @@ type panelAnswer struct {
 	// Addr — адрес, который панель слушает сейчас. По нему администратор
 	// пробрасывает порт через SSH, когда панель спрятана на петле.
 	Addr string `json:"addr"`
+
+	// Host — имя, по которому открывается панель. В режиме SSH-туннеля это
+	// имя сертификата, а не адрес проброса.
+	Host string `json:"host"`
 }
 
 // handlePanel рассказывает вошедшему, кому панель показывает себя.
 func (s *Server) handlePanel(w http.ResponseWriter, _ *http.Request) {
-	s.answerJSON(w, http.StatusOK, panelAnswer{Access: s.Access(), Addr: s.address()})
+	settings, err := s.store.PanelSettings()
+	if err != nil {
+		s.answerStoreError(w, "чтение настроек панели", err)
+
+		return
+	}
+
+	domain, err := s.store.Domain()
+	if err != nil {
+		s.answerStoreError(w, "чтение домена сервера", err)
+
+		return
+	}
+
+	s.answerJSON(w, http.StatusOK, panelAnswer{
+		Access: s.Access(),
+		Addr:   s.address(),
+		Host:   settings.Host(domain),
+	})
 }
 
 // handleSetAccess включает и выключает публичный доступ.
@@ -53,6 +75,24 @@ func (s *Server) handleSetAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	domain, err := s.store.Domain()
+	if err != nil {
+		s.logger.Error("домен сервера", "err", err)
+		s.answerError(w, http.StatusInternalServerError, "не удалось прочитать домен сервера")
+
+		return
+	}
+
+	candidate := settings
+	candidate.Access = request.Access
+	if domain != "" {
+		if err := candidate.ValidateFor(domain); err != nil {
+			s.answerError(w, http.StatusBadRequest, err.Error())
+
+			return
+		}
+	}
+
 	if request.Access == store.AccessPublic && !s.publicAllowed(w) {
 		return
 	}
@@ -80,7 +120,11 @@ func (s *Server) handleSetAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.answerJSON(w, http.StatusOK, panelAnswer{Access: s.Access(), Addr: s.address()})
+	s.answerJSON(w, http.StatusOK, panelAnswer{
+		Access: s.Access(),
+		Addr:   s.address(),
+		Host:   settings.Host(domain),
+	})
 }
 
 // publicAllowed проверяет, можно ли открыть панель наружу, и сам отвечает

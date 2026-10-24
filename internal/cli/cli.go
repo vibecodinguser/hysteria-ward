@@ -195,8 +195,13 @@ func startPanel(opts daemon.PanelOptions, debug bool) (daemon.Panel, error) {
 	if err != nil {
 		return nil, err
 	}
-	if domain != "" {
-		manager.SetNames(certs.Hosts(domain))
+
+	settings, err := opts.Store.PanelSettings()
+	if err != nil {
+		return nil, err
+	}
+	if names := settings.Hosts(domain); len(names) != 0 {
+		manager.SetNames(names)
 	}
 
 	certificate, err := certs.Load(opts.Config.TLS.Cert, opts.Config.TLS.Key)
@@ -215,15 +220,8 @@ func startPanel(opts daemon.PanelOptions, debug bool) (daemon.Panel, error) {
 		opts.Logger.Warn("настоящий сертификат не читается, беру самоподписанный",
 			"err", err, "acme", acmeConfigured)
 
-		settings, settingsErr := opts.Store.PanelSettings()
-		if settingsErr != nil {
-			return nil, settingsErr
-		}
-
 		hosts := panelHosts(settings.Addr())
-		if domain != "" {
-			hosts = append(hosts, certs.Hosts(domain)...)
-		}
+		hosts = append(hosts, settings.Hosts(domain)...)
 
 		certificate, err = certs.SelfSigned(hosts...)
 		if err != nil {
@@ -291,24 +289,30 @@ func acmeBackground(opts daemon.PanelOptions, manager *certs.Manager, apply func
 		return nil
 	}
 
-	settings, err := opts.Store.ACMESettings()
+	acmeSettings, err := opts.Store.ACMESettings()
 	if err != nil {
 		opts.Logger.Error("настройки ACME", "err", err)
 		return nil
 	}
 
+	panelSettings, err := opts.Store.PanelSettings()
+	if err != nil {
+		opts.Logger.Error("настройки панели", "err", err)
+		return nil
+	}
+
 	config := certs.ACMEConfig{
-		Names:              certs.Hosts(domain),
+		Names:              panelSettings.Hosts(domain),
 		Email:              email,
-		DirectoryURL:       settings.Directory,
+		DirectoryURL:       acmeSettings.Directory,
 		AccountKeyPath:     certs.AccountKeyPath(opts.Config.TLS.Cert),
 		CertPath:           opts.Config.TLS.Cert,
 		KeyPath:            opts.Config.TLS.Key,
-		Mode:               certs.Mode(settings.Mode),
-		DNSProvider:        settings.DNSProvider,
-		DNSHook:            settings.DNSHook,
-		CloudflareAPIToken: settings.CloudflareAPIToken,
-		CloudflareZoneID:   settings.CloudflareZoneID,
+		Mode:               certs.Mode(acmeSettings.Mode),
+		DNSProvider:        acmeSettings.DNSProvider,
+		DNSHook:            acmeSettings.DNSHook,
+		CloudflareAPIToken: acmeSettings.CloudflareAPIToken,
+		CloudflareZoneID:   acmeSettings.CloudflareZoneID,
 		Logger:             opts.Logger,
 	}
 

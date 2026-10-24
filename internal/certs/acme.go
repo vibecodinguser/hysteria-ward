@@ -49,27 +49,12 @@ const (
 	DNSProviderCloudflare = "cloudflare"
 )
 
-// Hosts перечисляет имена одного сертификата: домен сервера, по которому
-// подключаются клиенты, и имя панели. Если домен уже начинается с panel.,
-// второго имени нет.
-func Hosts(domain string) []string {
-	domain = strings.ToLower(strings.TrimSpace(domain))
-	if domain == "" {
-		return nil
-	}
-
-	if strings.HasPrefix(domain, "panel.") {
-		return []string{domain}
-	}
-
-	return []string{domain, "panel." + domain}
-}
-
 // ACMEConfig — всё, что нужно, чтобы выпустить сертификат.
 type ACMEConfig struct {
-	// Names — имена будущего сертификата: домен сервера и имя панели. Один
-	// сертификат на оба: клиенты Hysteria видят сервер по домену, а
-	// администратор заходит на панель по panel.<домен>.
+	// Names — имена будущего сертификата: домен сервера и, если панель живёт
+	// на отдельном имени, домен панели. Один сертификат на оба: клиенты
+	// Hysteria видят сервер по домену, а администратор заходит на панель по
+	// тому же сертификату.
 	Names []string
 
 	// Email — адрес учётной записи ACME.

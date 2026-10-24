@@ -179,6 +179,45 @@ func TestValidateInitialSetup(t *testing.T) {
 			want:   "порт панели",
 		},
 		{
+			name: "публичная панель на домене сервера",
+			change: func(s *store.InitialSetup) {
+				s.Panel.Access = store.AccessPublic
+				s.Panel.Mode = store.PanelModeServer
+			},
+			want: "публичная панель",
+		},
+		{
+			name: "server с отдельным доменом",
+			change: func(s *store.InitialSetup) {
+				s.Panel.Mode = store.PanelModeServer
+				s.Panel.Domain = "panel.example.com"
+			},
+			want: "в режиме server",
+		},
+		{
+			name: "поддомен в другом базовом домене",
+			change: func(s *store.InitialSetup) {
+				s.Panel.Mode = store.PanelModeSubdomain
+				s.Panel.Domain = "panel.example.net"
+			},
+			want: "базовом домене",
+		},
+		{
+			name: "поддомен совпал с доменом сервера",
+			change: func(s *store.InitialSetup) {
+				s.Panel.Mode = store.PanelModeSubdomain
+				s.Panel.Domain = "example.com"
+			},
+			want: "должен отличаться",
+		},
+		{
+			name: "неизвестный режим панели",
+			change: func(s *store.InitialSetup) {
+				s.Panel.Mode = "wildcard"
+			},
+			want: "режим домена панели",
+		},
+		{
 			name:   "нет имени администратора",
 			change: func(s *store.InitialSetup) { s.Admin.Name = "" },
 			want:   "имя администратора",
@@ -199,6 +238,82 @@ func TestValidateInitialSetup(t *testing.T) {
 				t.Fatalf("ValidateInitialSetup() = nil, ожидалась ошибка %q", test.want)
 			} else if !strings.Contains(err.Error(), test.want) {
 				t.Errorf("ошибка = %q, ожидалась причина %q", err, test.want)
+			}
+		})
+	}
+}
+
+// TestValidateInitialSetupPanelModes — начальная настройка принимает оба режима
+// домена панели и отвергает недопустимую пару с доменом сервера.
+func TestValidateInitialSetupPanelModes(t *testing.T) {
+	tests := []struct {
+		name     string
+		access   store.Access
+		mode     store.PanelMode
+		domain   string
+		wantHost string
+		wantErr  bool
+	}{
+		{
+			name:     "server для туннеля",
+			access:   store.AccessTunnel,
+			mode:     store.PanelModeServer,
+			wantHost: "example.com",
+		},
+		{
+			name:     "subdomain по умолчанию",
+			access:   store.AccessTunnel,
+			mode:     store.PanelModeSubdomain,
+			wantHost: "panel.example.com",
+		},
+		{
+			name:     "свой поддомен нормализуется",
+			access:   store.AccessTunnel,
+			mode:     store.PanelModeSubdomain,
+			domain:   "Admin.Example.COM",
+			wantHost: "admin.example.com",
+		},
+		{
+			name:     "старая запись без режима",
+			access:   store.AccessPublic,
+			mode:     "",
+			wantHost: "panel.example.com",
+		},
+		{
+			name:    "публичная панель на домене сервера",
+			access:  store.AccessPublic,
+			mode:    store.PanelModeServer,
+			wantErr: true,
+		},
+		{
+			name:    "поддомен вне базового домена",
+			access:  store.AccessTunnel,
+			mode:    store.PanelModeSubdomain,
+			domain:  "panel.example.net",
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setup := initialSetup(t)
+			setup.Panel.Access = test.access
+			setup.Panel.Mode = test.mode
+			setup.Panel.Domain = test.domain
+
+			normalized, err := store.ValidateInitialSetup(setup)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("ValidateInitialSetup() = nil, ожидалась ошибка")
+				}
+
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateInitialSetup() = %v", err)
+			}
+			if host := normalized.Panel.Host(normalized.Domain); host != test.wantHost {
+				t.Errorf("Host = %q, ожидался %q", host, test.wantHost)
 			}
 		})
 	}

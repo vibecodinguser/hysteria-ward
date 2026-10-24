@@ -8,6 +8,7 @@ import (
 
 	"github.com/vibecodinguser/hysteria-ward/internal/api"
 	"github.com/vibecodinguser/hysteria-ward/internal/config"
+	"github.com/vibecodinguser/hysteria-ward/internal/store"
 )
 
 // serverOf читает настройки сервера.
@@ -107,6 +108,75 @@ func TestMasqueradeIsSavedAndApplied(t *testing.T) {
 	}
 	if applied != 3 {
 		t.Errorf("ядро перезапущено %d раз, ожидалось 3", applied)
+	}
+}
+
+// TestDomainChangeKeepsPanelPairValid — смена домена сервера не должна оставить
+// панель на имени из чужого базового домена. Явный поддомен в том же базовом
+// домене остаётся, а режим server следует за сервером.
+func TestDomainChangeKeepsPanelPairValid(t *testing.T) {
+	opts := options(t)
+	if err := opts.Store.SaveDomain("example.com"); err != nil {
+		t.Fatalf("SaveDomain() = %v", err)
+	}
+
+	settings, err := opts.Store.PanelSettings()
+	if err != nil {
+		t.Fatalf("PanelSettings() = %v", err)
+	}
+	settings.Mode = store.PanelModeSubdomain
+	settings.Domain = "panel.example.com"
+	if err := opts.Store.SavePanelSettings(settings); err != nil {
+		t.Fatalf("SavePanelSettings() = %v", err)
+	}
+
+	s := start(t, opts)
+	cookie, csrf := enter(t, s, "admin", "admin")
+
+	resp := do(t, s, http.MethodPut, "/api/server", `{"domain":"example.net"}`, cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("смена домена на чужой базовый: код %d, ожидался 400", resp.StatusCode)
+	}
+	if body := readBody(t, resp); !strings.Contains(body, "базовом домене") {
+		t.Errorf("ответ = %q, ожидалась причина отказа", body)
+	}
+	if got := serverOf(t, s, cookie).Domain; got != "example.com" {
+		t.Errorf("домен после отказа = %q, ожидался прежний example.com", got)
+	}
+
+	resp = do(t, s, http.MethodPut, "/api/server", `{"domain":"new.example.com"}`, cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("смена домена в том же базовом: код %d, ожидался 200", resp.StatusCode)
+	}
+
+	answer := decode[panelAnswer](t, do(t, s, http.MethodGet, "/api/panel", "", cookie, nil))
+	if answer.Host != "panel.example.com" {
+		t.Errorf("явный поддомен после смены домена = %q, ожидался panel.example.com", answer.Host)
+	}
+
+	// Режим server не хранит отдельного имени: после смены домена панель
+	// открывается по новому домену сервера.
+	settings, err = opts.Store.PanelSettings()
+	if err != nil {
+		t.Fatalf("PanelSettings() = %v", err)
+	}
+	settings.Mode = store.PanelModeServer
+	settings.Domain = ""
+	if err := opts.Store.SavePanelSettings(settings); err != nil {
+		t.Fatalf("SavePanelSettings() = %v", err)
+	}
+
+	resp = do(t, s, http.MethodPut, "/api/server", `{"domain":"other.example.net"}`, cookie,
+		map[string]string{"X-CSRF-Token": csrf})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("смена домена для режима server: код %d, ожидался 200", resp.StatusCode)
+	}
+
+	answer = decode[panelAnswer](t, do(t, s, http.MethodGet, "/api/panel", "", cookie, nil))
+	if answer.Host != "other.example.net" {
+		t.Errorf("домен панели в режиме server = %q, ожидался other.example.net", answer.Host)
 	}
 }
 

@@ -88,7 +88,11 @@ func database(t *testing.T) *store.Store {
 func settings(t *testing.T) store.PanelSettings {
 	t.Helper()
 
-	return store.PanelSettings{Access: store.AccessTunnel, Port: freePort(t)}
+	return store.PanelSettings{
+		Access: store.AccessTunnel,
+		Port:   freePort(t),
+		Mode:   store.PanelModeSubdomain,
+	}
 }
 
 // freePort занимает и сразу освобождает порт: тесту нужен номер, который панель
