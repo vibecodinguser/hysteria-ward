@@ -204,6 +204,20 @@ expect_mode "1 — полная переустановка" "1" reinstall
 expect_mode "слово reinstall" "reinstall" reinstall
 expect_mode "слово update" "update" update
 
+# Явный флаг важнее вопроса: режим не переспрашивается и не перебивается вводом.
+INSTALL_MODE="reinstall"
+mode_input=$(mktemp)
+printf '2\n' >"$mode_input"
+choose_install_mode <"$mode_input" >/dev/null 2>&1
+[ "$INSTALL_MODE" = "reinstall" ] ||
+	{ printf 'FAIL: вопрос перебил --reinstall\n' >&2; exit 1; }
+printf '1\n' >"$mode_input"
+INSTALL_MODE="update"
+choose_install_mode <"$mode_input" >/dev/null 2>&1
+[ "$INSTALL_MODE" = "update" ] ||
+	{ printf 'FAIL: вопрос перебил --update\n' >&2; exit 1; }
+rm -f "$mode_input"
+
 mode_input=$(mktemp)
 printf 'нет\n1\n' >"$mode_input"
 INSTALL_MODE=""
