@@ -64,6 +64,11 @@ GENERATE_PASSWORD=0
 ASSUME_YES=0
 SKIP_UPGRADE=0
 
+# Что делать с уже настроенной панелью: update — обновить, reinstall — стереть
+# базу, сертификаты и журнал и настроить заново. Пустое значение — режим ещё не
+# выбран: с терминалом спросим, без терминала останется update.
+INSTALL_MODE=""
+
 # Как будет задан пароль: file — прочитать из PASSWORD_FILE; generate — придумать
 # при записи настроек. По умолчанию пароль генерируется: угадываемого пароля по
 # умолчанию в панели нет.
@@ -118,6 +123,8 @@ Flags:
   --yes                  do not ask for confirmation before installing
   --skip-upgrade         do not upgrade the system before installing
   --no-tui               ask questions as plain text, without the wizard
+  --update               update the configured panel (default on repeat runs)
+  --reinstall            full reinstall: delete the database, certificates and log
   --help                 show this help
 
 Installer answers:
@@ -146,8 +153,10 @@ question; --no-tui keeps plain text instead. Without a terminal all answers are
 required; the password is generated and printed once at the end. On the first
 install it runs apt update and apt upgrade -y; --skip-upgrade skips this step.
 
-Running it again on a configured panel does not touch the database or the
-installer answers: only the binary, unit and certificate mode are updated.
+Running it again on a configured panel asks what to do: update (keep the
+database, users and certificates) or do a full reinstall (delete the database,
+certificates and log, then ask the installer questions again). Without a
+terminal it updates unless --reinstall is given.
 
 Run the script as root on Ubuntu LTS or Debian 12/13.
 EOF
@@ -166,6 +175,8 @@ EOF
   --yes                  не спрашивать подтверждение перед установкой
   --skip-upgrade         не обновлять систему перед установкой
   --no-tui               задавать вопросы обычным текстом, без мастера
+  --update               обновить настроенную панель (по умолчанию)
+  --reinstall            полная переустановка: удалить базу, сертификаты и журнал
   --help                 показать эту справку
 
 Ответы конфигуратора:
@@ -194,8 +205,11 @@ EOF
 пароль генерируется сам и печатается один раз в конце. На первой установке
 выполняется apt update и apt upgrade -y; --skip-upgrade пропускает этот шаг.
 
-Повторный запуск на уже настроенной панели не трогает базу и ответы
-конфигуратора: обновляются только бинарь, юнит и режим сертификата.
+Повторный запуск на уже настроенной панели спрашивает, что сделать: обновить
+(база, пользователи и сертификаты остаются) или переустановить полностью
+(база, сертификаты и журнал удаляются, вопросы конфигуратора задаются заново).
+Без терминала по умолчанию выполняется обновление; для полной переустановки
+нужен --reinstall.
 
 Скрипт нужно запускать от root на Ubuntu LTS или Debian 12/13.
 EOF
@@ -230,6 +244,16 @@ Masquerade (off — выключен, file — свой сайт, proxy — зе
 Проверьте ответ|Check the answer
 Подтверждение|Confirmation
 Начать установку?|Start the installation?
+Что необходимо сделать?|What should be done?
+Панель уже настроена. Обновить её или настроить заново?|The panel is already configured. Update it or set it up again?
+Полная переустановка|Full reinstall
+Обновление|Update
+Выбор [2]:|Choice [2]:
+Будут удалены база, сертификаты и журнал. Начать полную переустановку?|The database, certificates and log will be deleted. Start the full reinstall?
+Продолжить полную переустановку? [y/N]:|Continue the full reinstall? [y/N]:
+полная переустановка удалит базу, сертификаты и журнал|a full reinstall deletes the database, certificates and log
+режим: 1 — полная переустановка, 2 — обновление|mode: 1 — full reinstall, 2 — update
+полная переустановка: удаляю базу, сертификаты и журнал|full reinstall: deleting the database, certificates and log
 Домен сервера|Server domain
 Домен панели|Panel domain
 E-mail для ACME|ACME e-mail
@@ -1111,19 +1135,34 @@ show_answers() {
 }
 
 # confirm_install — последний вопрос перед изменениями. --yes пропускает его в
-# обоих режимах.
+# обоих режимах. При полной переустановке вопрос называет цену: база,
+# сертификаты и журнал будут удалены.
 confirm_install() {
 	[ "$INTERACTIVE" -eq 1 ] || return 0
 	[ "$ASSUME_YES" -eq 0 ] || return 0
 
+	if [ "$INSTALL_MODE" = "reinstall" ]; then
+		confirm_title="$(translate 'Полная переустановка')"
+		confirm_text="$(translate 'Будут удалены база, сертификаты и журнал. Начать полную переустановку?')"
+		confirm_prompt="$(translate 'Продолжить полную переустановку? [y/N]:')"
+	else
+		confirm_title="$(translate 'Подтверждение')"
+		confirm_text="$(translate 'Начать установку?')"
+		confirm_prompt="$(translate 'Продолжить установку? [y/N]:')"
+	fi
+
 	if [ "$TUI" -eq 1 ]; then
-		tui_confirm "$(translate 'Подтверждение')" "$(translate 'Начать установку?')" ||
+		tui_confirm "$confirm_title" "$confirm_text" ||
 			tui_cancel
 
 		return 0
 	fi
 
-	printf '%s ' "$(translate 'Продолжить установку? [y/N]:')" >&2
+	if [ "$INSTALL_MODE" = "reinstall" ]; then
+		warn "$(translate 'полная переустановка удалит базу, сертификаты и журнал')"
+	fi
+
+	printf '%s ' "$confirm_prompt" >&2
 	if ! IFS= read -r REPLY; then
 		die "подтверждение не получено"
 	fi
@@ -1135,6 +1174,59 @@ confirm_install() {
 		exit 0
 		;;
 	esac
+}
+
+# choose_install_mode — что делать с уже настроенной панелью. Спрашивается после
+# языка и до вопросов конфигуратора: от ответа зависит, задавать ли их заново.
+# Пустой ответ и Enter — обновление: оно ничего не удаляет.
+choose_install_mode() {
+	[ -z "$INSTALL_MODE" ] || return 0
+
+	if [ "$TUI" -eq 1 ]; then
+		mode_text="$(translate 'Панель уже настроена. Обновить её или настроить заново?')"
+	else
+		mode_text="$(translate 'Что необходимо сделать?')
+  1. $(translate 'Полная переустановка')
+  2. $(translate 'Обновление')
+$(translate 'Выбор [2]:')"
+	fi
+
+	while :; do
+		mode=$(read_choice "$(translate 'Что необходимо сделать?')" "$mode_text" \
+			update \
+			reinstall "$(translate 'Полная переустановка')" \
+			update "$(translate 'Обновление')") ||
+			input_failed "выбор режима не получен"
+
+		case "$(trim "$mode")" in
+		""|2|update)
+			INSTALL_MODE="update"
+			return 0
+			;;
+		1|reinstall)
+			INSTALL_MODE="reinstall"
+			return 0
+			;;
+		*) notify "$(translate 'режим: 1 — полная переустановка, 2 — обновление')" ;;
+		esac
+	done
+}
+
+# wipe_installation — полная переустановка: убирает базу, сертификаты и журнал.
+# Вызывается как можно позже: после проверки ответов, скачивания релиза и
+# setup --check, перед записью новой базы. Служба останавливается первой: иначе
+# она держала бы старую базу открытой и писала бы в удалённый журнал до самого
+# перезапуска. Копий не делается: это выбор пользователя, а не сбой.
+wipe_installation() {
+	info "полная переустановка: удаляю базу, сертификаты и журнал"
+
+	systemctl stop "$PRODUCT.service" 2>/dev/null || true
+
+	rm -f "$DB" "$LOG"
+	for file in "$CERTS_DIR"/*; do
+		[ -f "$file" ] || continue
+		rm -f "$file"
+	done
 }
 
 # validate_answers проверяет всё, что можно проверить до изменений. Ошибка здесь
@@ -1433,6 +1525,18 @@ while [ "$#" -gt 0 ]; do
 		NO_TUI=1
 		shift
 		;;
+	--reinstall)
+		[ "$INSTALL_MODE" != "update" ] ||
+			die "режим: либо --reinstall, либо --update"
+		INSTALL_MODE="reinstall"
+		shift
+		;;
+	--update)
+		[ "$INSTALL_MODE" != "reinstall" ] ||
+			die "режим: либо --reinstall, либо --update"
+		INSTALL_MODE="update"
+		shift
+		;;
 	--domain)
 		[ "$#" -ge 2 ] || die "после --domain нужен домен"
 		DOMAIN="$2"
@@ -1647,32 +1751,48 @@ info "система: $OS_NAME, linux/$ARCH"
 
 # --- ответы конфигуратора ----------------------------------------------------
 
-# Настроенная база — признак того, что панель уже прошла конфигуратор. Ответы
-# повторного запуска к ней не применяются: домен, пароль и masquerade уже живут
-# в базе, и переписывать их установщиком нельзя.
+# Настроенная база — признак того, что панель уже прошла конфигуратор. При
+# обычном обновлении ответы повторного запуска к ней не применяются: домен,
+# пароль и masquerade уже живут в базе, и переписывать их установщиком нельзя.
+# Полная переустановка стирает базу и проходит конфигуратор заново.
 CONFIGURED=0
 if [ -s "$DB" ]; then
 	CONFIGURED=1
 fi
 
+if [ -t 0 ]; then
+	INTERACTIVE=1
+else
+	INTERACTIVE=0
+fi
+
+# Мастер открывается только после вопроса о языке: подписи окон надо на чём-то
+# построить. Дальше он меняет только способ ввода.
+if [ "$INTERACTIVE" -eq 1 ]; then
+	run_wizard
+fi
+
+# Настроенная база — ещё не приговор: можно обновиться, сохранив данные, или
+# стереть всё и настроить заново. Вопрос задаётся до вопросов конфигуратора,
+# потому что от ответа зависит, нужны ли они. Без терминала по умолчанию
+# обновление: оно ничего не удаляет.
 if [ "$CONFIGURED" -eq 1 ]; then
+	if [ "$INTERACTIVE" -eq 1 ]; then
+		choose_install_mode
+	fi
+	[ -n "$INSTALL_MODE" ] || INSTALL_MODE="update"
+else
+	INSTALL_MODE="install"
+fi
+
+if [ "$CONFIGURED" -eq 1 ] && [ "$INSTALL_MODE" = "update" ]; then
+	SETUP_NEEDED=0
 	if [ -n "$DOMAIN$ACME_EMAIL$ACME_DIRECTORY$ACME_DNS_PROVIDER$ACME_DNS_HOOK$ACME_DNS_TOKEN_FILE$ACME_DNS_ZONE_ID$PANEL_ACCESS$MASQUERADE$MASQUERADE_FILE$MASQUERADE_PROXY$PASSWORD_FILE" ] ||
 		[ "$GENERATE_PASSWORD" -eq 1 ]; then
 		warn "панель уже настроена: ответы конфигуратора не применяются"
 	fi
 else
-	if [ -t 0 ]; then
-		INTERACTIVE=1
-	else
-		INTERACTIVE=0
-	fi
-
-	# Мастер открывается только после вопроса о языке: подписи окон надо на чём-то
-	# построить. Дальше он меняет только способ ввода.
-	if [ "$INTERACTIVE" -eq 1 ]; then
-		run_wizard
-	fi
-
+	SETUP_NEEDED=1
 	if [ "$INTERACTIVE" -eq 0 ]; then
 		MISSING=""
 		[ -n "$DOMAIN" ] || MISSING="$MISSING --domain"
@@ -1843,7 +1963,7 @@ fi
 # Токен Cloudflare читает команда setup от имени службы. Исходный файл может
 # лежать в /root; временная копия делает его доступным только службе, а после
 # записи в базу удаляется.
-if [ "$CONFIGURED" -eq 0 ] && [ "$ACME_MODE" = "dns" ] && [ "$ACME_DNS_PROVIDER" = "cloudflare" ]; then
+if [ "$SETUP_NEEDED" -eq 1 ] && [ "$ACME_MODE" = "dns" ] && [ "$ACME_DNS_PROVIDER" = "cloudflare" ]; then
 	ACME_TOKEN_TMP="$STATE_DIR/.cloudflare-token"
 	install -m 0600 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$ACME_DNS_TOKEN_FILE" "$ACME_TOKEN_TMP" ||
 		die "не удалось подготовить файл с токеном Cloudflare"
@@ -1852,7 +1972,7 @@ fi
 
 # Каталог сайта читает уже не root, а служба. Проверяем это от её имени: иначе
 # установка дошла бы до записи базы и упала на первом же обращении к сайту.
-if [ "$CONFIGURED" -eq 0 ] && [ "$MASQUERADE" = "file" ]; then
+if [ "$SETUP_NEEDED" -eq 1 ] && [ "$MASQUERADE" = "file" ]; then
 	if ! runuser -u "$SERVICE_USER" -- test -r "$MASQUERADE_FILE" ||
 		! runuser -u "$SERVICE_USER" -- test -x "$MASQUERADE_FILE"; then
 		die "$(translate 'каталог сайта недоступен пользователю') $SERVICE_USER: $MASQUERADE_FILE — $(translate 'нужны права на чтение и проход')"
@@ -1861,7 +1981,7 @@ fi
 
 # Хук DNS запускает служба, а не root: проверяем его от её имени. Файл с
 # токеном Cloudflare тоже читает команда настройки от имени службы.
-if [ "$CONFIGURED" -eq 0 ] && [ "$ACME_MODE" = "dns" ]; then
+if [ "$SETUP_NEEDED" -eq 1 ] && [ "$ACME_MODE" = "dns" ]; then
 	case "$ACME_DNS_PROVIDER" in
 	cloudflare)
 		if ! runuser -u "$SERVICE_USER" -- test -r "$ACME_DNS_TOKEN_FILE"; then
@@ -1940,7 +2060,7 @@ fi
 
 # Ответы проверяет тот же код, который будет их записывать. Проверка ничего не
 # создаёт и не меняет: она ещё раз ловит опечатку до записи базы и запуска службы.
-if [ "$CONFIGURED" -eq 0 ]; then
+if [ "$SETUP_NEEDED" -eq 1 ]; then
 	info "проверяю ответы конфигуратора"
 	run_setup "$BIN_SRC" check >/dev/null ||
 		die "ответы конфигуратора не прошли проверку"
@@ -1977,7 +2097,16 @@ fi
 
 # Записываем ответы до запуска службы: панель должна подняться уже с доменом,
 # доступом и паролем, а не оказаться на секунду открытой с паролем по умолчанию.
-if [ "$CONFIGURED" -eq 0 ]; then
+#
+# Полная переустановка стирает данные как можно позже: только здесь, после
+# проверки ответов, скачивания релиза и setup --check. Отказ на любом из этих
+# шагов не должен стоить базы и сертификатов.
+if [ "$INSTALL_MODE" = "reinstall" ]; then
+	wipe_installation
+	CONFIGURED=0
+fi
+
+if [ "$SETUP_NEEDED" -eq 1 ]; then
 	info "сохраняю настройки"
 
 	case "$PASSWORD_MODE" in
@@ -2119,7 +2248,7 @@ fi
 
 # --- итог ------------------------------------------------------------------
 
-if [ "$CONFIGURED" -eq 0 ]; then
+if [ "$SETUP_NEEDED" -eq 1 ]; then
 	CERT_SUMMARY="$(translate 'Способ проверки:') ${ACME_TEXT}."
 	case "$ACME_MODE" in
 	dns)
@@ -2223,7 +2352,7 @@ fi
 
 # Пароль — последним блоком: он генерируется при установке и показывается ровно
 # один раз. В базе лежит только хеш, восстановить его оттуда нельзя.
-if [ "$CONFIGURED" -eq 0 ] && [ "$PASSWORD_MODE" = "generate" ]; then
+if [ "$SETUP_NEEDED" -eq 1 ] && [ "$PASSWORD_MODE" = "generate" ]; then
 	if [ "$LANG_CODE" = "en" ]; then
 		cat <<EOF
 

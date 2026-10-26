@@ -36,6 +36,14 @@ fi
 # --no-tui — обычный флаг: разбор не должен считать его лишним аргументом.
 sh "$SCRIPT" --no-tui --help >/dev/null 2>&1 || fail "--no-tui не принят"
 
+# Режим повторного запуска задаётся флагом; --reinstall и --update вместе
+# противоречат друг другу и должны быть отвергнуты разбором.
+sh "$SCRIPT" --reinstall --help >/dev/null 2>&1 || fail "--reinstall не принят"
+sh "$SCRIPT" --update --help >/dev/null 2>&1 || fail "--update не принят"
+if sh "$SCRIPT" --reinstall --update --help >/dev/null 2>&1; then
+	fail "--reinstall и --update приняты вместе"
+fi
+
 grep -q 'https://panel\.' "$SCRIPT" && fail "в установщике остался жёсткий https://panel.<домен>"
 
 # Английская таблица должна покрывать все ключи, которые установщик передаёт в
@@ -173,6 +181,62 @@ expect_panel "panel.* public уходит на поддомен" panel.example.c
 expect_reject "public + server" example.com public server ""
 expect_reject "чужой базовый домен" example.com tunnel "" panel.example.net
 expect_reject "server с доменом" example.com tunnel server admin.example.com
+
+# Режим повторного запуска: Enter и «2» — обновление, «1» и слово — полная
+# переустановка. Негодный ответ повторяет вопрос, как и остальные вопросы.
+expect_mode() {
+	label="$1"
+	answer="$2"
+	want="$3"
+	mode_input=$(mktemp)
+	printf '%s\n' "$answer" >"$mode_input"
+	INSTALL_MODE=""
+	choose_install_mode <"$mode_input" >/dev/null 2>&1 ||
+		{ printf 'FAIL: %s: вопрос не принял ответ\n' "$label" >&2; exit 1; }
+	[ "$INSTALL_MODE" = "$want" ] ||
+		{ printf 'FAIL: %s: режим %s, ожидался %s\n' "$label" "$INSTALL_MODE" "$want" >&2; exit 1; }
+	rm -f "$mode_input"
+}
+
+expect_mode "Enter — обновление" "" update
+expect_mode "2 — обновление" "2" update
+expect_mode "1 — полная переустановка" "1" reinstall
+expect_mode "слово reinstall" "reinstall" reinstall
+expect_mode "слово update" "update" update
+
+mode_input=$(mktemp)
+printf 'нет\n1\n' >"$mode_input"
+INSTALL_MODE=""
+choose_install_mode <"$mode_input" >/dev/null 2>&1
+[ "$INSTALL_MODE" = "reinstall" ] ||
+	{ printf 'FAIL: негодный ответ не повторил вопрос о режиме\n' >&2; exit 1; }
+rm -f "$mode_input"
+
+# Полная переустановка стирает базу, сертификаты и журнал, но не чужие
+# резервные копии: каталог backups остаётся.
+wipe_tmp=$(mktemp -d)
+mkdir -p "$wipe_tmp/certs" "$wipe_tmp/state/backups" "$wipe_tmp/log" "$wipe_tmp/bin"
+printf db >"$wipe_tmp/state/hysteria-ward.db"
+printf cert >"$wipe_tmp/certs/fullchain.pem"
+printf key >"$wipe_tmp/certs/privkey.pem"
+printf log >"$wipe_tmp/log/hysteria-ward.log"
+printf backup >"$wipe_tmp/state/backups/old.db"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s/systemctl.log"\n' "$wipe_tmp" >"$wipe_tmp/bin/systemctl"
+chmod +x "$wipe_tmp/bin/systemctl"
+
+DB="$wipe_tmp/state/hysteria-ward.db"
+CERTS_DIR="$wipe_tmp/certs"
+LOG="$wipe_tmp/log/hysteria-ward.log"
+PATH="$wipe_tmp/bin:$PATH"
+wipe_installation >/dev/null 2>&1
+[ ! -e "$DB" ] || { printf 'FAIL: переустановка оставила базу\n' >&2; exit 1; }
+[ ! -e "$LOG" ] || { printf 'FAIL: переустановка оставила журнал\n' >&2; exit 1; }
+[ -z "$(ls -A "$CERTS_DIR")" ] || { printf 'FAIL: переустановка оставила сертификаты\n' >&2; exit 1; }
+[ -e "$wipe_tmp/state/backups/old.db" ] ||
+	{ printf 'FAIL: переустановка удалила резервные копии\n' >&2; exit 1; }
+grep -q 'stop hysteria-ward.service' "$wipe_tmp/systemctl.log" ||
+	{ printf 'FAIL: переустановка не остановила службу\n' >&2; exit 1; }
+rm -rf "$wipe_tmp"
 
 printf 'install.sh: проверки домена панели пройдены\n'
 HARNESS
@@ -316,6 +380,45 @@ cancel_out=$(PATH="$stub_dir:$PATH" \
 	sh "$wizard.tmp" 2>&1) || status=$?
 [ "$status" -eq 0 ] || fail "отмена мастера вернула код $status"
 printf '%s' "$cancel_out" | grep -q 'отменено' || fail "отмена мастера не сказала «отменено»"
+
+# Вопрос о режиме повторного запуска — тоже окно мастера: умолчание update,
+# пункты «Полная переустановка» и «Обновление».
+cat >"$wizard" <<'WIZARD'
+TUI=1
+INSTALL_MODE=""
+choose_install_mode
+printf 'mode: %s\n' "$INSTALL_MODE"
+WIZARD
+head -n $((marker - 1)) "$SCRIPT" >"$wizard.tmp"
+cat "$wizard" >>"$wizard.tmp"
+: >"$stub_dir/log"
+rm -f "$stub_dir/count"
+printf 'reinstall\n' >"$stub_dir/answers"
+
+got=$(PATH="$stub_dir:$PATH" \
+	WHIPTAIL_LOG="$stub_dir/log" \
+	WHIPTAIL_ANSWERS="$stub_dir/answers" \
+	WHIPTAIL_COUNT="$stub_dir/count" \
+	sh "$wizard.tmp" 2>&1)
+printf '%s\n' "$got" | grep -q 'mode: reinstall' || fail "мастер не вернул режим: $got"
+
+log=$(cat "$stub_dir/log")
+for expect in '--default-item update' 'Полная переустановка' 'Обновление'; do
+	printf '%s' "$log" | grep -q -- "$expect" || fail "окно режима без пункта: $expect"
+done
+
+# Отмена в окне режима — такой же отказ с кодом 0.
+: >"$stub_dir/log"
+rm -f "$stub_dir/count"
+printf '@fail\n' >"$stub_dir/answers"
+status=0
+cancel_out=$(PATH="$stub_dir:$PATH" \
+	WHIPTAIL_LOG="$stub_dir/log" \
+	WHIPTAIL_ANSWERS="$stub_dir/answers" \
+	WHIPTAIL_COUNT="$stub_dir/count" \
+	sh "$wizard.tmp" 2>&1) || status=$?
+[ "$status" -eq 0 ] || fail "отмена окна режима вернула код $status"
+printf '%s' "$cancel_out" | grep -q 'отменено' || fail "отмена окна режима не сказала «отменено»"
 
 printf 'install.sh: проверки мастера пройдены\n'
 printf 'install.sh: проверки пройдены\n'
