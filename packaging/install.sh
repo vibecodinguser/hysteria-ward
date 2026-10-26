@@ -75,6 +75,12 @@ ADMIN_PASSWORD=""
 LANG_CODE="ru"
 LANG_SET=0
 
+# Мастер в псевдографике. Включается только когда он заведомо работоспособен:
+# терминал на входе и выходе, живой TERM и whiptail в PATH. TUI — уже принятое
+# решение для этого запуска, NO_TUI — приказ не включать мастер вовсе.
+NO_TUI=0
+TUI=0
+
 # Режим домена панели и её отдельное имя. Пустой PANEL_MODE до проверки означает
 # «не задан»: после проверки он становится subdomain. Пустой PANEL_DOMAIN — это
 # panel.<домен>, то есть значение по умолчанию, которое не хранится в базе и
@@ -111,6 +117,7 @@ Flags:
   --no-debug             do not allow a self-signed certificate
   --yes                  do not ask for confirmation before installing
   --skip-upgrade         do not upgrade the system before installing
+  --no-tui               ask questions as plain text, without the wizard
   --help                 show this help
 
 Installer answers:
@@ -134,9 +141,10 @@ Installer answers:
   --generate-password    kept for compatibility: the password is always generated
 
 With a terminal the script asks for missing answers and shows them before
-installing. Without a terminal all answers are required; the password is
-generated and printed once at the end. On the first install it runs apt update
-and apt upgrade -y; --skip-upgrade skips this step.
+installing. When whiptail is available it does so with a wizard: one window per
+question; --no-tui keeps plain text instead. Without a terminal all answers are
+required; the password is generated and printed once at the end. On the first
+install it runs apt update and apt upgrade -y; --skip-upgrade skips this step.
 
 Running it again on a configured panel does not touch the database or the
 installer answers: only the binary, unit and certificate mode are updated.
@@ -157,6 +165,7 @@ EOF
   --no-debug             не разрешать самоподписанный сертификат
   --yes                  не спрашивать подтверждение перед установкой
   --skip-upgrade         не обновлять систему перед установкой
+  --no-tui               задавать вопросы обычным текстом, без мастера
   --help                 показать эту справку
 
 Ответы конфигуратора:
@@ -180,9 +189,10 @@ EOF
   --generate-password    оставлен для совместимости: пароль генерируется всегда
 
 С терминалом скрипт спрашивает недостающие ответы и показывает их перед началом
-установки. Без терминала нужны все ответы; пароль генерируется сам и печатается
-один раз в конце. На первой установке выполняется apt update и apt upgrade -y;
---skip-upgrade пропускает этот шаг.
+установки. Если в системе есть whiptail, вопросы задаёт мастер: по окну на
+вопрос; --no-tui оставляет обычный текст. Без терминала нужны все ответы;
+пароль генерируется сам и печатается один раз в конце. На первой установке
+выполняется apt update и apt upgrade -y; --skip-upgrade пропускает этот шаг.
 
 Повторный запуск на уже настроенной панели не трогает базу и ответы
 конфигуратора: обновляются только бинарь, юнит и режим сертификата.
@@ -216,6 +226,33 @@ Masquerade (off — выключен, file — свой сайт, proxy — зе
 Каталог сайта для masquerade:|Site directory for masquerade:
 Адрес зеркала (http:// или https://):|Mirror URL (http:// or https://):
 Продолжить установку? [y/N]:|Continue installation? [y/N]:
+Проверьте ответы|Check your answers
+Проверьте ответ|Check the answer
+Подтверждение|Confirmation
+Начать установку?|Start the installation?
+Домен сервера|Server domain
+Домен панели|Panel domain
+E-mail для ACME|ACME e-mail
+Способ проверки ACME|ACME challenge
+DNS-провайдер|DNS provider
+Программа-хук для записей TXT|TXT record hook
+Файл с токеном Cloudflare|Cloudflare token file
+Идентификатор зоны Cloudflare|Cloudflare zone ID
+Доступ к панели|Panel access
+Режим домена панели|Panel domain mode
+Каталог сайта|Site directory
+Адрес зеркала|Mirror URL
+Masquerade|Masquerade
+Cloudflare|Cloudflare
+Снаружи|From outside
+На домене сервера|On the server domain
+На отдельном имени|On a separate name
+Выключен|Disabled
+Свой сайт|Your own site
+Своя программа|Your own program
+Зеркало чужого сайта|A mirror of another site
+HTTP-01: файл на порту 80|HTTP-01: a file on port 80
+DNS-01: запись TXT у провайдера|DNS-01: a TXT record at the provider
 ввод домена оборван|domain input interrupted
 ввод e-mail оборван|e-mail input interrupted
 ввод способа проверки ACME оборван|ACME challenge input interrupted
@@ -518,6 +555,140 @@ run_logged() {
 	return 1
 }
 
+# --- мастер установки -------------------------------------------------------
+#
+# Мастер меняет только способ ввода. Ответы попадают в те же переменные, а
+# проверяет их validate_answers — те же функции, что и в текстовом режиме.
+# Поэтому мастер не может записать то, чего не принял бы обычный вопрос.
+
+# tui_available — можно ли вообще открывать окна. Без терминала (curl | sh,
+# перенаправленный вывод) окна рисовать некуда, на TERM=dumb они превращаются в
+# мусор, а без whiptail рисовать нечем.
+tui_available() {
+	[ "$NO_TUI" -eq 0 ] || return 1
+	[ -t 0 ] || return 1
+	[ -t 2 ] || return 1
+
+	case "${TERM:-}" in
+	""|dumb) return 1 ;;
+	esac
+
+	command -v whiptail >/dev/null 2>&1
+}
+
+# tui_input ЗАГОЛОВОК ТЕКСТ УМОЛЧАНИЕ — окно ввода. Ответ приходит в stdout:
+# whiptail печатает его в stderr, поэтому потоки меняются местами на время
+# вызова, а сам интерфейс уходит на терминал.
+tui_input() {
+	answer=$(whiptail --title "$1" --inputbox "$2" 12 70 "$3" 3>&1 1>&2 2>&3) || return 1
+
+	printf '%s' "$answer"
+}
+
+# tui_menu ЗАГОЛОВОК ТЕКСТ УМОЛЧАНИЕ ЗНАЧЕНИЕ ПОДПИСЬ... — окно выбора. Пары
+# «значение — подпись» уже лежат в позиционных параметрах, поэтому подписи с
+# пробелами остаются одним аргументом без склейки строк.
+tui_menu() {
+	title="$1"
+	text="$2"
+	default="$3"
+	shift 3
+
+	answer=$(whiptail --title "$title" --default-item "$default" \
+		--menu "$text" 16 70 8 "$@" 3>&1 1>&2 2>&3) || return 1
+
+	printf '%s' "$answer"
+}
+
+# tui_msgbox ЗАГОЛОВОК ТЕКСТ — показать и подождать «Ok».
+tui_msgbox() {
+	whiptail --title "$1" --msgbox "$2" 22 78
+}
+
+# tui_confirm ЗАГОЛОВОК ВОПРОС — спросить да/нет. Ноль — да, ненулевой код — нет.
+tui_confirm() {
+	whiptail --title "$1" --yesno "$2" 12 70
+}
+
+# tui_cancel — «Отмена» или Esc в любом окне. Это отказ от установки, а не
+# ошибка: до этого момента в системе ничего не менялось.
+tui_cancel() {
+	info "отменено"
+	exit 0
+}
+
+# input_failed — ответа нет. В мастере это отмена, в терминале — конец ввода:
+# значит, терминала нет, и продолжать нечем.
+input_failed() {
+	if [ "$TUI" -eq 1 ]; then
+		tui_cancel
+	fi
+
+	die "$1"
+}
+
+# notify — сообщение о негодном ответе. В мастере это окно: печатать мимо него
+# бессмысленно, экран занят. В терминале — прежнее предупреждение.
+notify() {
+	if [ "$TUI" -eq 1 ]; then
+		tui_msgbox "$(translate 'Проверьте ответ')" "$(translate "$*")"
+
+		return
+	fi
+
+	warn "$*"
+}
+
+# read_answer ЗАГОЛОВОК ВОПРОС УМОЛЧАНИЕ — одна строка ответа.
+read_answer() {
+	if [ "$TUI" -eq 1 ]; then
+		tui_input "$1" "$2" "$3"
+
+		return
+	fi
+
+	printf '%s ' "$2" >&2
+
+	reply=""
+	if ! IFS= read -r reply; then
+		return 1
+	fi
+
+	printf '%s' "$reply"
+}
+
+# read_choice ЗАГОЛОВОК ВОПРОС УМОЛЧАНИЕ ЗНАЧЕНИЕ ПОДПИСЬ... — выбор из списка.
+# В терминале вопрос уже содержит допустимые значения и умолчание, поэтому
+# подписи нужны только мастеру.
+read_choice() {
+	title="$1"
+	text="$2"
+	default="$3"
+	shift 3
+
+	if [ "$TUI" -eq 1 ]; then
+		tui_menu "$title" "$text" "$default" "$@"
+
+		return
+	fi
+
+	printf '%s ' "$text" >&2
+
+	reply=""
+	if ! IFS= read -r reply; then
+		return 1
+	fi
+
+	printf '%s' "$reply"
+}
+
+# run_wizard — открывает мастер, если он доступен.
+run_wizard() {
+	if tui_available; then
+		TUI=1
+	fi
+}
+
 # trim убирает пробелы по краям ответа.
 trim() {
 	printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
@@ -571,124 +742,127 @@ trap 'exit 1' HUP INT TERM
 
 ask_domain() {
 	while :; do
-		printf '%s ' "$(translate 'Домен сервера (например example.com):')" >&2
-		if ! IFS= read -r DOMAIN; then
-			die "ввод домена оборван"
-		fi
+		DOMAIN=$(read_answer "$(translate 'Домен сервера')" \
+			"$(translate 'Домен сервера (например example.com):')" "$DOMAIN") ||
+			input_failed "ввод домена оборван"
 
 		DOMAIN="$(trim "$DOMAIN" | tr '[:upper:]' '[:lower:]')"
 		if valid_domain "$DOMAIN"; then
 			return
 		fi
 
-		warn "нужно имя вида example.com, без схемы, пути и порта"
+		notify "нужно имя вида example.com, без схемы, пути и порта"
 	done
 }
 
 ask_email() {
 	while :; do
-		printf '%s ' "$(translate 'E-mail для ACME:')" >&2
-		if ! IFS= read -r ACME_EMAIL; then
-			die "ввод e-mail оборван"
-		fi
+		ACME_EMAIL=$(read_answer "$(translate 'E-mail для ACME')" \
+			"$(translate 'E-mail для ACME:')" "$ACME_EMAIL") ||
+			input_failed "ввод e-mail оборван"
 
 		ACME_EMAIL="$(trim "$ACME_EMAIL")"
 		if valid_email "$ACME_EMAIL"; then
 			return
 		fi
 
-		warn "нужен полный адрес вида name@example.com"
+		notify "нужен полный адрес вида name@example.com"
 	done
 }
 
 ask_acme_mode() {
 	while :; do
-		printf '%s ' "$(translate 'Способ проверки ACME (http — порт 80, dns — TXT у DNS-провайдера) [http]:')" >&2
-		if ! IFS= read -r ACME_MODE; then
-			die "ввод способа проверки ACME оборван"
-		fi
+		ACME_MODE=$(read_choice "$(translate 'Способ проверки ACME')" \
+			"$(translate 'Способ проверки ACME (http — порт 80, dns — TXT у DNS-провайдера) [http]:')" \
+			http \
+			http "$(translate 'HTTP-01: файл на порту 80')" \
+			dns "$(translate 'DNS-01: запись TXT у провайдера')") ||
+			input_failed "ввод способа проверки ACME оборван"
 
 		ACME_MODE="$(trim "$ACME_MODE")"
 		[ -n "$ACME_MODE" ] || ACME_MODE="http"
 
 		case "$ACME_MODE" in
 		http|dns) return ;;
-		*) warn "способ проверки ACME: http или dns" ;;
+		*) notify "способ проверки ACME: http или dns" ;;
 		esac
 	done
 }
 
 ask_acme_dns_provider() {
 	while :; do
-		printf '%s ' "$(translate 'DNS-провайдер (hook — своя программа, cloudflare — API) [hook]:')" >&2
-		if ! IFS= read -r ACME_DNS_PROVIDER; then
-			die "ввод DNS-провайдера оборван"
-		fi
+		ACME_DNS_PROVIDER=$(read_choice "$(translate 'DNS-провайдер')" \
+			"$(translate 'DNS-провайдер (hook — своя программа, cloudflare — API) [hook]:')" \
+			hook \
+			hook "$(translate 'Своя программа')" \
+			cloudflare "$(translate 'Cloudflare')") ||
+			input_failed "ввод DNS-провайдера оборван"
 
 		ACME_DNS_PROVIDER="$(trim "$ACME_DNS_PROVIDER")"
 		[ -n "$ACME_DNS_PROVIDER" ] || ACME_DNS_PROVIDER="hook"
 
 		case "$ACME_DNS_PROVIDER" in
 		hook|cloudflare) return ;;
-		*) warn "DNS-провайдер: hook или cloudflare" ;;
+		*) notify "DNS-провайдер: hook или cloudflare" ;;
 		esac
 	done
 }
 
 ask_acme_dns_hook() {
 	while :; do
-		printf '%s ' "$(translate 'Программа-хук для записей TXT:')" >&2
-		if ! IFS= read -r ACME_DNS_HOOK; then
-			die "ввод хука DNS оборван"
-		fi
+		ACME_DNS_HOOK=$(read_answer "$(translate 'Программа-хук для записей TXT')" \
+			"$(translate 'Программа-хук для записей TXT:')" "$ACME_DNS_HOOK") ||
+			input_failed "ввод хука DNS оборван"
 
 		ACME_DNS_HOOK="$(trim "$ACME_DNS_HOOK")"
 		if [ -n "$ACME_DNS_HOOK" ]; then
 			return
 		fi
 
-		warn "нужен путь к исполняемой программе"
+		notify "нужен путь к исполняемой программе"
 	done
 }
 
 ask_acme_dns_token_file() {
 	while :; do
-		printf '%s ' "$(translate 'Файл с API-токеном Cloudflare (право Zone.DNS Edit):')" >&2
-		if ! IFS= read -r ACME_DNS_TOKEN_FILE; then
-			die "ввод файла с токеном Cloudflare оборван"
-		fi
+		ACME_DNS_TOKEN_FILE=$(read_answer "$(translate 'Файл с токеном Cloudflare')" \
+			"$(translate 'Файл с API-токеном Cloudflare (право Zone.DNS Edit):')" \
+			"$ACME_DNS_TOKEN_FILE") ||
+			input_failed "ввод файла с токеном Cloudflare оборван"
 
 		ACME_DNS_TOKEN_FILE="$(trim "$ACME_DNS_TOKEN_FILE")"
 		if [ -n "$ACME_DNS_TOKEN_FILE" ]; then
 			return
 		fi
 
-		warn "токен читается из файла, чтобы не попасть в историю оболочки"
+		notify "токен читается из файла, чтобы не попасть в историю оболочки"
 	done
 }
 
 ask_acme_dns_zone_id() {
-	printf '%s ' "$(translate 'Идентификатор зоны Cloudflare (необязательно, Enter — искать по домену):')" >&2
-	if ! IFS= read -r ACME_DNS_ZONE_ID; then
-		die "ввод идентификатора зоны Cloudflare оборван"
-	fi
+	ACME_DNS_ZONE_ID=$(read_answer "$(translate 'Идентификатор зоны Cloudflare')" \
+		"$(translate 'Идентификатор зоны Cloudflare (необязательно, Enter — искать по домену):')" \
+		"$ACME_DNS_ZONE_ID") ||
+		input_failed "ввод идентификатора зоны Cloudflare оборван"
 
 	ACME_DNS_ZONE_ID="$(trim "$ACME_DNS_ZONE_ID")"
 }
 
 ask_access() {
 	while :; do
-		printf '%s ' "$(translate 'Режим доступа к панели (tunnel — SSH-туннель, public — снаружи) [tunnel]:')" >&2
-		if ! IFS= read -r PANEL_ACCESS; then
-			die "ввод режима доступа оборван"
-		fi
+		PANEL_ACCESS=$(read_choice "$(translate 'Доступ к панели')" \
+			"$(translate 'Режим доступа к панели (tunnel — SSH-туннель, public — снаружи) [tunnel]:')" \
+			tunnel \
+			tunnel "$(translate 'SSH-туннель')" \
+			public "$(translate 'Снаружи')") ||
+			input_failed "ввод режима доступа оборван"
 
 		PANEL_ACCESS="$(trim "$PANEL_ACCESS")"
 		[ -n "$PANEL_ACCESS" ] || PANEL_ACCESS="tunnel"
 
 		case "$PANEL_ACCESS" in
 		tunnel|public) return ;;
-		*) warn "режим доступа: tunnel или public" ;;
+		*) notify "режим доступа: tunnel или public" ;;
 		esac
 	done
 }
@@ -734,25 +908,28 @@ ask_panel_mode() {
 
 	mode_default="$(default_panel_mode)"
 
+	case "$mode_default" in
+	server)
+		mode_prompt="$(translate 'Режим домена панели (server — домен сервера, subdomain — отдельное имя) [server]:')"
+		;;
+	*)
+		mode_prompt="$(translate 'Режим домена панели (server — домен сервера, subdomain — отдельное имя) [subdomain]:')"
+		;;
+	esac
+
 	while :; do
-		case "$mode_default" in
-		server)
-			printf '%s ' "$(translate 'Режим домена панели (server — домен сервера, subdomain — отдельное имя) [server]:')" >&2
-			;;
-		*)
-			printf '%s ' "$(translate 'Режим домена панели (server — домен сервера, subdomain — отдельное имя) [subdomain]:')" >&2
-			;;
-		esac
-		if ! IFS= read -r PANEL_MODE; then
-			die "ввод режима домена панели оборван"
-		fi
+		PANEL_MODE=$(read_choice "$(translate 'Режим домена панели')" "$mode_prompt" \
+			"$mode_default" \
+			server "$(translate 'На домене сервера')" \
+			subdomain "$(translate 'На отдельном имени')") ||
+			input_failed "ввод режима домена панели оборван"
 
 		PANEL_MODE="$(trim "$PANEL_MODE" | tr '[:upper:]' '[:lower:]')"
 		[ -n "$PANEL_MODE" ] || PANEL_MODE="$mode_default"
 
 		case "$PANEL_MODE" in
 		server|subdomain) return ;;
-		*) warn "режим домена панели: server или subdomain" ;;
+		*) notify "режим домена панели: server или subdomain" ;;
 		esac
 	done
 }
@@ -763,10 +940,9 @@ ask_panel_domain() {
 	[ "$PANEL_MODE" = "server" ] && return
 
 	while :; do
-		printf '%s ' "$(translate 'Домен панели (Enter — panel.<домен>):')" >&2
-		if ! IFS= read -r PANEL_DOMAIN; then
-			die "ввод домена панели оборван"
-		fi
+		PANEL_DOMAIN=$(read_answer "$(translate 'Домен панели')" \
+			"$(translate 'Домен панели (Enter — panel.<домен>):')" "$PANEL_DOMAIN") ||
+			input_failed "ввод домена панели оборван"
 
 		PANEL_DOMAIN="$(trim "$PANEL_DOMAIN" | tr '[:upper:]' '[:lower:]')"
 		if [ -z "$PANEL_DOMAIN" ] || [ "$PANEL_DOMAIN" = "panel.${DOMAIN}" ]; then
@@ -790,10 +966,13 @@ base_domain() {
 
 ask_masquerade() {
 	while :; do
-		printf '%s ' "$(translate 'Masquerade (off — выключен, file — свой сайт, proxy — зеркало) [off]:')" >&2
-		if ! IFS= read -r MASQUERADE; then
-			die "ввод режима masquerade оборван"
-		fi
+		MASQUERADE=$(read_choice "$(translate 'Masquerade')" \
+			"$(translate 'Masquerade (off — выключен, file — свой сайт, proxy — зеркало) [off]:')" \
+			off \
+			off "$(translate 'Выключен')" \
+			file "$(translate 'Свой сайт')" \
+			proxy "$(translate 'Зеркало чужого сайта')") ||
+			input_failed "ввод режима masquerade оборван"
 
 		MASQUERADE="$(trim "$MASQUERADE")"
 		[ -n "$MASQUERADE" ] || MASQUERADE="off"
@@ -808,45 +987,46 @@ ask_masquerade() {
 			ask_masquerade_proxy
 			return
 			;;
-		*) warn "masquerade: off, file или proxy" ;;
+		*) notify "masquerade: off, file или proxy" ;;
 		esac
 	done
 }
 
 ask_masquerade_file() {
 	while :; do
-		printf '%s ' "$(translate 'Каталог сайта для masquerade:')" >&2
-		if ! IFS= read -r MASQUERADE_FILE; then
-			die "ввод каталога сайта оборван"
-		fi
+		MASQUERADE_FILE=$(read_answer "$(translate 'Каталог сайта')" \
+			"$(translate 'Каталог сайта для masquerade:')" "$MASQUERADE_FILE") ||
+			input_failed "ввод каталога сайта оборван"
 
 		MASQUERADE_FILE="$(trim "$MASQUERADE_FILE")"
 		if [ -d "$MASQUERADE_FILE" ]; then
 			return
 		fi
 
-		warn "$(translate 'каталога нет:') $MASQUERADE_FILE — $(translate 'masquerade file отдаёт файлы из существующего каталога')"
+		notify "$(translate 'каталога нет:') $MASQUERADE_FILE — $(translate 'masquerade file отдаёт файлы из существующего каталога')"
 	done
 }
 
 ask_masquerade_proxy() {
 	while :; do
-		printf '%s ' "$(translate 'Адрес зеркала (http:// или https://):')" >&2
-		if ! IFS= read -r MASQUERADE_PROXY; then
-			die "ввод адреса зеркала оборван"
-		fi
+		MASQUERADE_PROXY=$(read_answer "$(translate 'Адрес зеркала')" \
+			"$(translate 'Адрес зеркала (http:// или https://):')" "$MASQUERADE_PROXY") ||
+			input_failed "ввод адреса зеркала оборван"
 
 		MASQUERADE_PROXY="$(trim "$MASQUERADE_PROXY")"
 		if valid_proxy "$MASQUERADE_PROXY"; then
 			return
 		fi
 
-		warn "адрес зеркала должен начинаться с http:// или https://"
+		notify "адрес зеркала должен начинаться с http:// или https://"
 	done
 }
 
-# show_answers показывает то, что будет записано, до первого изменения в системе.
-show_answers() {
+# answers_summary собирает сводку ответов и A-записи одним текстом: в мастере это
+# одно окно, в терминале — один блок. DNS проверять блокирующе нельзя: запись
+# могли создать только что, и установка не должна ждать распространения, поэтому
+# здесь только напоминание с адресом сервера.
+answers_summary() {
 	case "$PANEL_ACCESS" in
 	tunnel) ACCESS_TEXT="$(translate 'SSH-туннель'), 127.0.0.1:8443" ;;
 	public) ACCESS_TEXT="$(translate 'публичный'), 0.0.0.0:8443" ;;
@@ -878,26 +1058,21 @@ show_answers() {
 	esac
 
 	if [ "$PANEL_MODE" = "server" ]; then
-		PANEL_MODE_TEXT="$(translate 'server (домен сервера)')"
+		PANEL_MODE_TEXT="$(translate 'На домене сервера')"
 	else
-		PANEL_MODE_TEXT="$(translate 'subdomain')"
+		PANEL_MODE_TEXT="$(translate 'На отдельном имени')"
 	fi
 
-	printf '\n%s\n' "$(translate 'Будет установлено:')" >&2
-	printf '  %-16s %s\n' "$(translate 'домен:')" "$DOMAIN" >&2
-	printf '  %-16s %s\n' "$(translate 'домен панели:')" "$PANEL_HOST" >&2
-	printf '  %-16s %s\n' "$(translate 'e-mail ACME:')" "$ACME_EMAIL" >&2
-	printf '  %-16s %s\n' "$(translate 'сертификат:')" "$ACME_TEXT" >&2
-	printf '  %-16s %s (%s)\n' "$(translate 'панель:')" "$ACCESS_TEXT" "$PANEL_MODE_TEXT" >&2
-	printf '  %-16s %s\n' "$(translate 'masquerade:')" "$MASQUERADE_TEXT" >&2
-	printf '  %-16s %s\n' "$(translate 'пароль:')" "$PASSWORD_TEXT" >&2
-	printf '\n' >&2
-}
+	printf '%s\n' "$(translate 'Будет установлено:')"
+	printf '  %s %s\n' "$(translate 'домен:')" "$DOMAIN"
+	printf '  %s %s\n' "$(translate 'домен панели:')" "$PANEL_HOST"
+	printf '  %s %s\n' "$(translate 'e-mail ACME:')" "$ACME_EMAIL"
+	printf '  %s %s\n' "$(translate 'сертификат:')" "$ACME_TEXT"
+	printf '  %s %s (%s)\n' "$(translate 'панель:')" "$ACCESS_TEXT" "$PANEL_MODE_TEXT"
+	printf '  %s %s\n' "$(translate 'masquerade:')" "$MASQUERADE_TEXT"
+	printf '  %s %s\n' "$(translate 'пароль:')" "$PASSWORD_TEXT"
+	printf '\n'
 
-# show_dns печатает A-записи, которые нужны до выпуска сертификата. Проверять
-# DNS блокирующе нельзя: запись могли создать только что, и установка не должна
-# ждать распространения. Поэтому здесь только напоминание с адресом сервера.
-show_dns() {
 	SERVER_IP=""
 	if command -v ip >/dev/null 2>&1; then
 		SERVER_IP="$(ip -4 route get 1.1.1.1 2>/dev/null |
@@ -905,21 +1080,61 @@ show_dns() {
 	fi
 	[ -n "$SERVER_IP" ] || SERVER_IP="<IPv4>"
 
-	printf '%s\n' "$(translate 'DNS: создайте A-записи:')" >&2
-	printf '  %-32s A  %s\n' "$DOMAIN" "$SERVER_IP" >&2
+	printf '%s\n' "$(translate 'DNS: создайте A-записи:')"
+	printf '  %-32s A  %s\n' "$DOMAIN" "$SERVER_IP"
 	if [ "$PANEL_HOST" != "$DOMAIN" ]; then
-		printf '  %-32s A  %s\n' "$PANEL_HOST" "$SERVER_IP" >&2
+		printf '  %-32s A  %s\n' "$PANEL_HOST" "$SERVER_IP"
 	fi
 
 	case "$ACME_MODE" in
 	dns)
-		printf '%s\n' "$(translate 'DNS-01: провайдер должен обслуживать обе зоны.')" >&2
+		printf '%s\n' "$(translate 'DNS-01: провайдер должен обслуживать обе зоны.')"
 		;;
 	*)
-		printf '%s\n' "$(translate 'HTTP-01: обе записи должны указывать на этот сервер, порт 80 свободен.')" >&2
+		printf '%s\n' "$(translate 'HTTP-01: обе записи должны указывать на этот сервер, порт 80 свободен.')"
 		;;
 	esac
-	printf '\n' >&2
+}
+
+# show_answers показывает то, что будет записано, до первого изменения в системе.
+# В мастере это окно, в терминале — блок в stderr.
+show_answers() {
+	summary="$(answers_summary)"
+
+	if [ "$TUI" -eq 1 ]; then
+		tui_msgbox "$(translate 'Проверьте ответы')" "$summary"
+
+		return
+	fi
+
+	printf '\n%s\n\n' "$summary" >&2
+}
+
+# confirm_install — последний вопрос перед изменениями. --yes пропускает его в
+# обоих режимах.
+confirm_install() {
+	[ "$INTERACTIVE" -eq 1 ] || return 0
+	[ "$ASSUME_YES" -eq 0 ] || return 0
+
+	if [ "$TUI" -eq 1 ]; then
+		tui_confirm "$(translate 'Подтверждение')" "$(translate 'Начать установку?')" ||
+			tui_cancel
+
+		return 0
+	fi
+
+	printf '%s ' "$(translate 'Продолжить установку? [y/N]:')" >&2
+	if ! IFS= read -r REPLY; then
+		die "подтверждение не получено"
+	fi
+
+	case "$(trim "$REPLY")" in
+	y|Y|yes|YES|да|Да|ДА) ;;
+	*)
+		info "отменено"
+		exit 0
+		;;
+	esac
 }
 
 # validate_answers проверяет всё, что можно проверить до изменений. Ошибка здесь
@@ -1214,6 +1429,10 @@ while [ "$#" -gt 0 ]; do
 		SKIP_UPGRADE=1
 		shift
 		;;
+	--no-tui)
+		NO_TUI=1
+		shift
+		;;
 	--domain)
 		[ "$#" -ge 2 ] || die "после --domain нужен домен"
 		DOMAIN="$2"
@@ -1448,6 +1667,12 @@ else
 		INTERACTIVE=0
 	fi
 
+	# Мастер открывается только после вопроса о языке: подписи окон надо на чём-то
+	# построить. Дальше он меняет только способ ввода.
+	if [ "$INTERACTIVE" -eq 1 ]; then
+		run_wizard
+	fi
+
 	if [ "$INTERACTIVE" -eq 0 ]; then
 		MISSING=""
 		[ -n "$DOMAIN" ] || MISSING="$MISSING --domain"
@@ -1508,22 +1733,7 @@ else
 
 	validate_answers
 	show_answers
-	show_dns
-
-	if [ "$INTERACTIVE" -eq 1 ] && [ "$ASSUME_YES" -eq 0 ]; then
-		printf '%s ' "$(translate 'Продолжить установку? [y/N]:')" >&2
-		if ! IFS= read -r REPLY; then
-			die "подтверждение не получено"
-		fi
-
-		case "$(trim "$REPLY")" in
-		y|Y|yes|YES|да|Да|ДА) ;;
-		*)
-			info "отменено"
-			exit 0
-			;;
-		esac
-	fi
+	confirm_install
 fi
 
 # --- обновление системы -----------------------------------------------------

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Проверки установщика, которые не требуют root и сети. Запускаются из make lint:
-# синтаксис, справка на обоих языках, --lang до --help, покрытие перевода и
-# правила пары «домен сервера — домен панели».
+# синтаксис, справка на обоих языках, --lang до --help, покрытие перевода,
+# правила пары «домен сервера — домен панели» и мастер в псевдографике.
 set -eu
 
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -33,6 +33,9 @@ if sh "$SCRIPT" --lang --help >/dev/null 2>&1; then
 	fail "пустой --lang принят"
 fi
 
+# --no-tui — обычный флаг: разбор не должен считать его лишним аргументом.
+sh "$SCRIPT" --no-tui --help >/dev/null 2>&1 || fail "--no-tui не принят"
+
 grep -q 'https://panel\.' "$SCRIPT" && fail "в установщике остался жёсткий https://panel.<домен>"
 
 # Английская таблица должна покрывать все ключи, которые установщик передаёт в
@@ -41,7 +44,9 @@ grep -q 'https://panel\.' "$SCRIPT" && fail "в установщике оста�
 used=$(mktemp)
 catalog=$(mktemp)
 harness=$(mktemp)
-trap 'rm -f "$used" "$catalog" "$harness"' EXIT
+wizard=$(mktemp)
+stub_dir=$(mktemp -d)
+trap 'rm -f "$used" "$catalog" "$harness" "$wizard"; rm -rf "$stub_dir"' EXIT
 
 grep -o "translate '[^']*'" "$SCRIPT" |
 	sed "s/^translate '//; s/'$//" |
@@ -63,8 +68,8 @@ duplicates=$(awk '
 [ -z "$duplicates" ] || fail "повторяющиеся ключи каталога: $duplicates"
 
 # Проверки ответов без root: берём только функции до разбора аргументов и
-# вызываем validate_answers на парах «сервер — панель». Так правила установщика
-# не расходятся с store, даже если их правят отдельно.
+# вызываем их напрямую. Так правила установщика не расходятся с store, даже если
+# их правят отдельно.
 marker=$(grep -n '^while \[ "\$#" -gt 0 \]; do' "$SCRIPT" | head -1 | cut -d: -f1)
 [ -n "$marker" ] || fail "не найден разбор аргументов установщика"
 
@@ -174,4 +179,143 @@ HARNESS
 
 sh "$harness" || exit 1
 
+# --- мастер в псевдографике -------------------------------------------------
+#
+# Настоящей псевдографики в CI нет, а гонять pty ради этого — источник случайных
+# падений. Поэтому whiptail подменяется стабом: он пишет полученные аргументы в
+# журнал и отдаёт заранее заданные ответы. Проверяется именно то, что зависит от
+# установщика: порядок окон, умолчания, повтор после негодного ответа и то, что
+# ответы доходят до тех же переменных, что и текст.
+
+cat >"$stub_dir/whiptail" <<'STUB'
+#!/bin/sh
+# Стаб whiptail: интерфейс уходит в stdout, ответ — в stderr, как у настоящего.
+count=0
+[ ! -f "$WHIPTAIL_COUNT" ] || count=$(cat "$WHIPTAIL_COUNT")
+count=$((count + 1))
+printf '%s' "$count" >"$WHIPTAIL_COUNT"
+printf '%s\n' "$*" >>"$WHIPTAIL_LOG"
+
+lines=$(awk 'END { print NR }' "$WHIPTAIL_ANSWERS")
+[ "$count" -le "$lines" ] || exit 1
+answer=$(sed -n "${count}p" "$WHIPTAIL_ANSWERS")
+
+action=""
+for arg in "$@"; do
+	case "$arg" in
+	--inputbox|--menu|--yesno|--msgbox) action="$arg" ;;
+	esac
+done
+
+case "$action" in
+--yesno)
+	case "$answer" in
+	yes) exit 0 ;;
+	*) exit 1 ;;
+	esac
+	;;
+--inputbox|--menu)
+	[ "$answer" = "@fail" ] && exit 1
+	printf '%s' "$answer" >&2
+	exit 0
+	;;
+esac
+
+exit 0
+STUB
+chmod +x "$stub_dir/whiptail"
+
+wizard_run() {
+	answers="$1"
+	cat >"$wizard" <<'WIZARD'
+TUI=1
+DOMAIN=""
+ACME_EMAIL=""
+PANEL_ACCESS=""
+PANEL_MODE=""
+PANEL_DOMAIN=""
+ACME_MODE=""
+ACME_DNS_PROVIDER=""
+MASQUERADE=""
+
+ask_domain
+ask_email
+ask_access
+ask_panel_mode
+ask_panel_domain
+ask_acme_mode
+ask_masquerade
+
+printf 'answers: %s|%s|%s|%s|%s|%s\n' \
+	"$DOMAIN" "$ACME_EMAIL" "$PANEL_ACCESS" "$PANEL_MODE" "$PANEL_DOMAIN" "$MASQUERADE"
+WIZARD
+
+	head -n $((marker - 1)) "$SCRIPT" >"$wizard.tmp"
+	cat "$wizard" >>"$wizard.tmp"
+
+	: >"$stub_dir/log"
+	rm -f "$stub_dir/count"
+	printf '%s\n' "$answers" >"$stub_dir/answers"
+
+	PATH="$stub_dir:$PATH" \
+		WHIPTAIL_LOG="$stub_dir/log" \
+		WHIPTAIL_ANSWERS="$stub_dir/answers" \
+		WHIPTAIL_COUNT="$stub_dir/count" \
+		sh "$wizard.tmp" 2>&1
+}
+
+# Ответы идут строками: по одной на окно. Пустая строка — Enter, то есть
+# умолчание.
+got=$(wizard_run "Example.COM
+admin@example.com
+tunnel
+subdomain
+
+http
+off")
+printf '%s\n' "$got" | grep -q 'answers: example.com|admin@example.com|tunnel|subdomain||off' ||
+	fail "мастер не довёл ответы до переменных: $got"
+
+log=$(cat "$stub_dir/log")
+for expect in '--inputbox' '--menu' '--default-item tunnel' '--default-item subdomain' \
+	'--default-item http' '--default-item off'; do
+	printf '%s' "$log" | grep -q -- "$expect" || fail "мастер не открыл окно: $expect"
+done
+printf '%s' "$log" | grep -q 'Домен сервера' || fail "заголовок окна не переведён"
+
+# Негодный ответ: окно повторяется, причина показывается в msgbox.
+got=$(wizard_run "не домен
+
+example.com
+admin@example.com
+tunnel
+subdomain
+
+http
+off")
+printf '%s\n' "$got" | grep -q 'answers: example.com|' || fail "мастер не повторил вопрос: $got"
+grep -q -- '--msgbox' "$stub_dir/log" || fail "мастер не показал причину отказа"
+
+# Отмена (Esc) — отказ от установки с кодом 0, а не ошибка.
+cat >"$wizard" <<'WIZARD'
+TUI=1
+DOMAIN=""
+ask_domain
+WIZARD
+head -n $((marker - 1)) "$SCRIPT" >"$wizard.tmp"
+cat "$wizard" >>"$wizard.tmp"
+: >"$stub_dir/log"
+rm -f "$stub_dir/count"
+printf '@fail\n' >"$stub_dir/answers"
+
+status=0
+cancel_out=$(PATH="$stub_dir:$PATH" \
+	WHIPTAIL_LOG="$stub_dir/log" \
+	WHIPTAIL_ANSWERS="$stub_dir/answers" \
+	WHIPTAIL_COUNT="$stub_dir/count" \
+	sh "$wizard.tmp" 2>&1) || status=$?
+[ "$status" -eq 0 ] || fail "отмена мастера вернула код $status"
+printf '%s' "$cancel_out" | grep -q 'отменено' || fail "отмена мастера не сказала «отменено»"
+
+printf 'install.sh: проверки мастера пройдены\n'
 printf 'install.sh: проверки пройдены\n'
