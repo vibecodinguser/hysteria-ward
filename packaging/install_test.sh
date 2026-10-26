@@ -111,6 +111,55 @@ expect_reject() {
 	fi
 }
 
+# run_logged: успешная команда не печатает свой вывод, отказ — печатает причину и
+# возвращает ненулевой код. Иначе установщик либо заливал бы экран, либо скрывал
+# причину сбоя apt.
+apt_log=$(mktemp)
+if ! quiet=$(run_logged "$apt_log" "apt upgrade" sh -c 'echo много вывода; echo и ещё' 2>&1); then
+	printf 'FAIL: run_logged отверг успешную команду\n' >&2
+	exit 1
+fi
+[ -z "$quiet" ] || { printf 'FAIL: run_logged напечатал вывод успешной команды: %s\n' "$quiet" >&2; exit 1; }
+
+if run_logged "$apt_log" "apt upgrade" sh -c 'echo причина отказа >&2; exit 9' >/dev/null 2>&1; then
+	printf 'FAIL: run_logged принял отказ\n' >&2
+	exit 1
+fi
+grep -q 'причина отказа' "$apt_log" || { printf 'FAIL: причина отказа не попала в журнал\n' >&2; exit 1; }
+[ -z "$RUN_PID" ] || { printf 'FAIL: RUN_PID не сброшен после команды\n' >&2; exit 1; }
+rm -f "$apt_log" "${apt_log}.status"
+
+# Прерывание установщика не должно оставлять долгую команду работать в одиночку:
+# cleanup убивает её по RUN_PID. Команда оставляет отметку о полученном сигнале —
+# так проверка не зависит от того, как оболочка отдаёт код завершения и когда
+# убирает зомби.
+ready=$(mktemp)
+killed=$(mktemp)
+rm -f "$ready" "$killed"
+sh -c "trap 'printf killed >\"$killed\"; exit 1' TERM; printf ready >\"$ready\"; while :; do sleep 0.1; done" &
+long_pid=$!
+
+# Ждём, пока команда поставит обработчик сигнала: иначе проверка стреляла бы в
+# ещё не готовый процесс и падала бы случайно.
+tries=0
+while [ ! -s "$ready" ] && [ "$tries" -lt 50 ]; do
+	tries=$((tries + 1))
+	sleep 0.1
+done
+[ -s "$ready" ] || { printf 'FAIL: долгая команда не запустилась\n' >&2; exit 1; }
+
+RUN_PID=$long_pid
+cleanup
+
+tries=0
+while [ ! -s "$killed" ] && [ "$tries" -lt 30 ]; do
+	tries=$((tries + 1))
+	sleep 0.1
+done
+[ -s "$killed" ] || { printf 'FAIL: cleanup не остановил долгую команду\n' >&2; exit 1; }
+rm -f "$ready" "$killed"
+wait "$long_pid" 2>/dev/null || true
+
 expect_panel "example.com tunnel" example.com tunnel "" "" subdomain panel.example.com
 expect_panel "panel.* tunnel" panel.example.com tunnel "" "" server panel.example.com
 expect_panel "явный поддомен" example.com tunnel "" admin.example.com subdomain admin.example.com

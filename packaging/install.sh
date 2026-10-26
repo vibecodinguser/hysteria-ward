@@ -88,6 +88,14 @@ TMP=""
 # записи в базу файл удаляется.
 ACME_TOKEN_TMP=""
 
+# Журнал apt: его вывод уходит туда, а не на экран. Нужен, чтобы при отказе
+# показать причину, не заливая терминал сотнями строк при успехе.
+APT_LOG=""
+
+# Процесс долгой команды, пока она идёт. Нужен, чтобы прерывание установщика
+# (Ctrl-C) не оставило apt работать в одиночку с занятым замком dpkg.
+RUN_PID=""
+
 usage() {
 	if [ "$LANG_CODE" = "en" ]; then
 		cat <<EOF
@@ -313,6 +321,8 @@ systemd не запущен: установка рассчитана на system
 (см. --help)|(see --help)
 не удалось обновить список пакетов|could not update the package list
 не удалось обновить систему|could not upgrade the system
+система обновлена|the system is up to date
+вывод команды:|command output:
 не удалось поставить зависимости|could not install dependencies
 не удалось подготовить файл с токеном Cloudflare|could not prepare the Cloudflare token file
 каталог сайта|site directory
@@ -451,6 +461,63 @@ die() {
 	exit 1
 }
 
+# run_logged ЖУРНАЛ МЕТКА КОМАНДА... — выполняет долгую команду, не заливая
+# экран её выводом. На терминале показывает бегущую строку с меткой и временем:
+# apt upgrade идёт минутами, и молчащий установщик легко принять за зависший.
+# Без терминала (CI, `curl | sh > файл`) прогресс не печатается вовсе.
+#
+# Вывод команды целиком уходит в журнал, а при ошибке печатается его хвост:
+# причина отказа нужна администратору, а не строка «не удалось».
+run_logged() {
+	log="$1"
+	label="$2"
+	shift 2
+
+	status_file="${log}.status"
+	rm -f "$status_file"
+	# Журнал начинается заново: при отказе нужен хвост именно этой команды, а не
+	# прошлых, которые уже прошли.
+	: >"$log"
+
+	# Код возврата пишется в файл, а не берётся из wait: так цикл прогресса
+	# видит завершение команды по появлению файла, без гонки с reap.
+	(
+		code=0
+		"$@" >>"$log" 2>&1 || code=$?
+		printf '%s' "$code" >"$status_file"
+	) &
+	pid=$!
+	RUN_PID="$pid"
+
+	if [ -t 2 ] && [ "${TERM:-dumb}" != "dumb" ]; then
+		started="$(date +%s)"
+		spinner="|/-\\"
+		frame=0
+		while [ ! -s "$status_file" ]; do
+			frame=$(( (frame + 1) % 4 ))
+			printf '\r  %s %s %ss ' "$label" \
+				"$(printf '%s' "$spinner" | cut -c $((frame + 1)))" \
+				"$(( $(date +%s) - started ))" >&2
+			sleep 1
+		done
+		printf '\r\033[K' >&2
+	fi
+
+	wait "$pid" 2>/dev/null || true
+	RUN_PID=""
+	code="$(cat "$status_file" 2>/dev/null || printf '1')"
+	rm -f "$status_file"
+
+	if [ "$code" -eq 0 ]; then
+		return 0
+	fi
+
+	printf '%s\n' "$(translate 'вывод команды:')" >&2
+	tail -n 25 "$log" >&2
+
+	return 1
+}
+
 # trim убирает пробелы по краям ответа.
 trim() {
 	printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
@@ -487,6 +554,15 @@ cleanup() {
 	fi
 	if [ -n "$ACME_TOKEN_TMP" ]; then
 		rm -f "$ACME_TOKEN_TMP"
+	fi
+	if [ -n "$RUN_PID" ]; then
+		# Прерывание установщика не должно оставлять apt в одиночестве: он
+		# держал бы замок dpkg, а установка уже сказала бы «отменено».
+		kill "$RUN_PID" 2>/dev/null || true
+		RUN_PID=""
+	fi
+	if [ -n "$APT_LOG" ]; then
+		rm -f "$APT_LOG" "${APT_LOG}.status"
 	fi
 }
 
@@ -1460,20 +1536,30 @@ APT_UPDATED=0
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=l
 
+# Журнал создаётся до первого apt: вывод apt-get целиком уходит туда, а на экран
+# попадает только бегущая строка. Не удалось создать — пишем рядом с установщиком
+# и не мешаем установке.
+APT_LOG="$(mktemp "${TMPDIR:-/tmp}/hysteria-ward-apt.XXXXXX" 2>/dev/null || true)"
+[ -n "$APT_LOG" ] || APT_LOG="${TMPDIR:-/tmp}/hysteria-ward-apt.log"
+
 if [ "$SKIP_UPGRADE" -eq 0 ] && [ "$CONFIGURED" -eq 0 ]; then
 	info "обновляю систему: apt update и apt upgrade"
-	apt-get -o DPkg::Lock::Timeout=120 update -qq ||
+	run_logged "$APT_LOG" "apt update" \
+		apt-get -o DPkg::Lock::Timeout=120 update -qq ||
 		die "не удалось обновить список пакетов"
 	APT_UPDATED=1
 
 	# force-confdef/force-confold: обновление не должно останавливаться на
 	# вопросе о конфигурационном файле. На свежем сервере таких файлов обычно
 	# нет, но образ может прийти с уже изменёнными настройками.
-	apt-get -o DPkg::Lock::Timeout=120 -y \
+	run_logged "$APT_LOG" "apt upgrade" \
+		apt-get -o DPkg::Lock::Timeout=120 -y \
 		-o Dpkg::Options::=--force-confdef \
 		-o Dpkg::Options::=--force-confold \
 		upgrade ||
 		die "не удалось обновить систему"
+
+	info "система обновлена"
 fi
 
 # --- зависимости ------------------------------------------------------------
@@ -1489,14 +1575,16 @@ if [ -n "$MISSING" ]; then
 	info "ставлю зависимости:$MISSING"
 
 	if [ "$APT_UPDATED" -eq 0 ]; then
-		apt-get -o DPkg::Lock::Timeout=120 update -qq ||
+		run_logged "$APT_LOG" "apt update" \
+			apt-get -o DPkg::Lock::Timeout=120 update -qq ||
 			die "не удалось обновить список пакетов"
 		APT_UPDATED=1
 	fi
 
 	# Список собран циклом выше; кавычки здесь разбивали бы его на аргументы.
 	# shellcheck disable=SC2086
-	apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends $MISSING ||
+	run_logged "$APT_LOG" "apt install" \
+		apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends $MISSING ||
 		die "не удалось поставить зависимости"
 fi
 
